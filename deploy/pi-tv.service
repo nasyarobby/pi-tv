@@ -1,0 +1,26 @@
+# System unit: /etc/systemd/system/pi-tv.service
+# Runs as the desktop user (default "pi", uid 1000) so it can open windows
+# on the Wayland (labwc) or X11 session, talk to PipeWire and use CEC.
+# Edit User=, Group= and the 1000 in XDG_RUNTIME_DIR if yours differ.
+[Unit]
+Description=Pi TV server (YouTube + local video on the TV)
+Wants=network-online.target
+After=network-online.target graphical.target systemd-user-sessions.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+SupplementaryGroups=video audio render
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=HOME=/home/pi
+# Wait (up to 90 s) for the desktop session's Wayland or X11 socket.
+ExecStartPre=/bin/sh -c 'for i in $(seq 90); do ls /run/user/1000/wayland-[0-9]* /tmp/.X11-unix/X0 >/dev/null 2>&1 && exit 0; sleep 1; done; exit 0'
+ExecStart=/opt/pi-tv/pi-tv-server --config /etc/pi-tv/pi-tv.env
+Restart=on-failure
+RestartSec=3
+# Stopping the service leaves the TV window as it is; only Close in a remote closes it.
+KillMode=process
+
+[Install]
+WantedBy=graphical.target

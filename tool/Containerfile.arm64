@@ -1,0 +1,14 @@
+# Build environment for the Pi TV server: Debian 13 (Trixie) linux/arm64,
+# so the AOT binary links against the same glibc as the Raspberry Pi.
+# Used only to BUILD the server; the Pi runs the binary natively (no Docker).
+FROM docker.io/library/debian:trixie
+ARG DART_VERSION=3.13.7
+RUN apt-get -o Acquire::EnableSrvRecords=false update \
+ && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::EnableSrvRecords=false install -y --no-install-recommends \
+      ca-certificates curl unzip git \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/dart.zip \
+      "https://storage.googleapis.com/dart-archive/channels/stable/release/${DART_VERSION}/sdk/dartsdk-linux-arm64-release.zip" \
+ && unzip -q /tmp/dart.zip -d /opt && rm /tmp/dart.zip
+ENV PATH=/opt/dart-sdk/bin:$PATH
+RUN dart --version

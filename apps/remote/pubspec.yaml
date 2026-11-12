@@ -1,0 +1,31 @@
+name: pi_tv_remote
+description: Pi TV remote (Android + Web).
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_secure_storage: ^11.2.0
+  mobile_scanner: ^7.5.0
+  qr_flutter: ^4.1.0
+  pi_tv_shared:
+    path: ../../packages/pi_tv_shared
+  web_socket_channel: ^3.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  http: ^1.2.0
+  async: ^2.11.0
+  stream_channel: ^2.1.0
+
+flutter:
+  uses-material-design: true

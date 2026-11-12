@@ -1,0 +1,19 @@
+# Alternative: systemd *user* unit, ~/.config/systemd/user/pi-tv.service
+#   systemctl --user enable --now pi-tv
+#   sudo loginctl enable-linger pi   # start at boot without a login shell
+# Inherits the session's WAYLAND_DISPLAY/DISPLAY when the desktop imports them
+# into the user manager; otherwise the server finds the socket itself.
+[Unit]
+Description=Pi TV server (user session)
+After=graphical-session.target network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for i in $(seq 90); do ls "$XDG_RUNTIME_DIR"/wayland-[0-9]* /tmp/.X11-unix/X0 >/dev/null 2>&1 && exit 0; sleep 1; done; exit 0'
+ExecStart=/opt/pi-tv/pi-tv-server --config /etc/pi-tv/pi-tv.env
+Restart=on-failure
+RestartSec=3
+KillMode=process
+
+[Install]
+WantedBy=default.target

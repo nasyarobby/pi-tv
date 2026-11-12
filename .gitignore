@@ -1,0 +1,26 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+*.iml
+.idea/
+.vscode/
+pubspec_overrides.yaml
+
+# Android
+apps/remote/android/.gradle/
+apps/remote/android/local.properties
+apps/remote/android/key.properties
+apps/remote/android/app/.cxx/
+*.jks
+*.keystore
+
+# Release artifacts (built by tool/*.sh)
+dist/
+
+# Local config / secrets - never commit a real PIN
+*.env
+!deploy/pi-tv.env.example
+.pi-tv/
