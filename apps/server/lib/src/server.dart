@@ -54,7 +54,7 @@ class PiTvServer {
     final chromium = ChromiumPlayer(
       runner: runner,
       display: display,
-      userDataDir: p.join(config.dataDir, 'chromium-profile'),
+      userDataDir: chromiumProfileDir(config.dataDir),
       cdpPort: config.cdpPort,
       chromiumPath: config.chromiumPath,
     );

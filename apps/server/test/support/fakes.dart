@@ -200,6 +200,21 @@ class FakeYouTubePage {
   bool ended = false;
   bool fullscreen = false;
   bool autoplayBlocked = false;
+
+  /// "f" does nothing (e.g. YouTube did not get the key).
+  bool ignoreFKey = false;
+
+  /// `requestFullscreen()` is rejected.
+  bool rejectRequestFullscreen = false;
+
+  /// The fullscreen element does not cover the screen (e.g. the window is
+  /// not the whole output yet).
+  bool fullscreenCoversScreen = true;
+
+  /// The player element is not ready for this many more state reads.
+  int notReadyReads = 0;
+  int fKeys = 0;
+  int requestFullscreenCalls = 0;
   double volume = 100;
   bool muted = false;
   String title = 'YouTube';
@@ -209,21 +224,27 @@ class FakeYouTubePage {
     return u?.queryParameters['v'];
   }
 
-  Map<String, Object?> state() => {
-        'vid': vid,
-        'url': url,
-        'title': title,
-        'hasVideo': hasVideo,
-        'ad': false,
-        't': t,
-        'd': d,
-        'paused': paused,
-        'ended': ended,
-        'vol': volume,
-        'muted': muted,
-        'fs': fullscreen,
-        'error': false,
-      };
+  Map<String, Object?> state() {
+    final ready = hasVideo && notReadyReads <= 0;
+    if (notReadyReads > 0) notReadyReads--;
+    return {
+      'vid': vid,
+      'url': url,
+      'title': title,
+      'hasVideo': hasVideo,
+      'ad': false,
+      't': t,
+      'd': d,
+      'paused': paused,
+      'ended': ended,
+      'vol': volume,
+      'muted': muted,
+      'fs': fullscreen,
+      'full': fullscreen && fullscreenCoversScreen && hasVideo,
+      'ready': ready,
+      'error': false,
+    };
+  }
 }
 
 class FakeCdpSession implements CdpSession {
@@ -251,11 +272,15 @@ class FakeCdpSession implements CdpSession {
         page.ended = false;
         page.t = 0;
         page.paused = true;
+        page.fullscreen = false; // a navigation leaves document fullscreen
         if (!page.autoplayBlocked) page.paused = false;
         return {};
       case 'Input.dispatchKeyEvent':
         if (params['type'] == 'keyDown') endpoint.keys.add(params['key'] as String);
-        if (params['type'] == 'keyDown' && params['key'] == 'f') page.fullscreen = !page.fullscreen;
+        if (params['type'] == 'keyDown' && params['key'] == 'f') {
+          page.fKeys++;
+          if (!page.ignoreFKey) page.fullscreen = !page.fullscreen;
+        }
         return {};
       case 'Input.dispatchMouseEvent':
         if (params['type'] == 'mouseReleased') page.paused = false;
@@ -314,6 +339,8 @@ class FakeCdpSession implements CdpSession {
         page.fullscreen = false;
         return true;
       case 'fullscreen':
+        page.requestFullscreenCalls++;
+        if (page.rejectRequestFullscreen) return false;
         page.fullscreen = true;
         return true;
       case 'rect':

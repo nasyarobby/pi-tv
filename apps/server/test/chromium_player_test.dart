@@ -30,6 +30,9 @@ void main() {
       endpoint: cdp,
       pollInterval: const Duration(hours: 1),
       settleDelay: Duration.zero,
+      fullscreenTimeout: const Duration(milliseconds: 200),
+      fullscreenRetryDelay: const Duration(milliseconds: 5),
+      fullscreenReapplyInterval: Duration.zero,
     );
   });
 
@@ -159,5 +162,160 @@ void main() {
     cdp.up = false;
     runner.processes.single.exit(0);
     expect((await closed).open, isFalse);
+  });
+
+  group('YouTube player fullscreen', () {
+    test('waits for the player to be ready, then sends "f" and verifies it covers the screen', () async {
+      cdp.page.notReadyReads = 12;
+      await player.load(const PlayTarget.youtube(link));
+      expect(cdp.page.notReadyReads, 0);
+      expect(cdp.page.fKeys, 1);
+      expect(cdp.page.fullscreen, isTrue);
+      expect(cdp.page.requestFullscreenCalls, 0);
+      final focus = cdp.log.lastIndexOf('eval:focus');
+      expect(focus, greaterThan(cdp.log.indexOf('eval:play')));
+      expect(focus, lessThan(cdp.log.lastIndexOf('Input.dispatchKeyEvent')));
+    });
+
+    test('falls back to requestFullscreen when "f" does not take', () async {
+      cdp.page.ignoreFKey = true;
+      await player.load(const PlayTarget.youtube(link));
+      expect(cdp.page.fKeys, 1);
+      expect(cdp.page.requestFullscreenCalls, 1);
+      expect(cdp.page.fullscreen, isTrue);
+    });
+
+    test('retries until the fullscreen element really covers the screen', () async {
+      cdp.page.fullscreenCoversScreen = false;
+      final load = player.load(const PlayTarget.youtube(link));
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      cdp.page.fullscreenCoversScreen = true;
+      await load;
+      expect(cdp.page.fullscreen, isTrue);
+      expect(cdp.page.state()['full'], isTrue);
+      // It kept trying, and exited the partial fullscreen before each new
+      // "f" so the toggle never turned the real one off.
+      expect(cdp.page.fKeys, greaterThan(1));
+      expect(cdp.log, contains('eval:exitfs'));
+    });
+
+    test('a failed attempt does not break playback, and the poll loop retries', () async {
+      cdp.page
+        ..ignoreFKey = true
+        ..rejectRequestFullscreen = true;
+      await player.load(const PlayTarget.youtube(link));
+      expect(cdp.page.fullscreen, isFalse);
+      expect(player.isOpen, isTrue);
+      expect(cdp.page.paused, isFalse);
+      cdp.page.rejectRequestFullscreen = false;
+      await player.setVolume(50); // runs a poll
+      await player.pendingFullscreen;
+      expect(cdp.page.fullscreen, isTrue);
+    });
+
+    test('is re-applied when the next queue item starts', () async {
+      await player.load(const PlayTarget.youtube(link));
+      expect(cdp.page.fullscreen, isTrue);
+      await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa')));
+      expect(cdp.page.vid, 'aaaaaaaaaaa');
+      expect(cdp.page.fKeys, 2);
+      expect(cdp.page.fullscreen, isTrue);
+    });
+
+    test('the poll loop puts the player back when it falls out of fullscreen', () async {
+      await player.load(const PlayTarget.youtube(link));
+      cdp.page.fullscreen = false;
+      await player.seek(10);
+      await player.pendingFullscreen;
+      expect(cdp.page.fullscreen, isTrue);
+      expect(cdp.page.t, 10);
+    });
+
+    test('Stop stays paused, fullscreen and open', () async {
+      await player.load(const PlayTarget.youtube(link));
+      await player.stop();
+      await player.pendingFullscreen;
+      expect(cdp.page.paused, isTrue);
+      expect(cdp.page.fullscreen, isTrue);
+      expect(cdp.browserClosed, isFalse);
+      expect(player.isOpen, isTrue);
+    });
+
+    test('after YouTube autoplays a related video, the ended video is fullscreen again and paused', () async {
+      await player.load(const PlayTarget.youtube(link));
+      cdp.page.url = 'https://www.youtube.com/watch?v=RELATED0000';
+      await player.pause(); // poll: returns to the ended video (navigation drops fullscreen)
+      expect(cdp.page.vid, 'dQw4w9WgXcQ');
+      await player.pause(); // next poll re-applies fullscreen
+      await player.pendingFullscreen;
+      expect(cdp.page.fullscreen, isTrue);
+      expect(cdp.page.paused, isTrue);
+      expect(cdp.page.vid, 'dQw4w9WgXcQ');
+      expect(player.snapshot.ended, isTrue);
+    });
+
+    test('Close stops re-applying fullscreen', () async {
+      await player.load(const PlayTarget.youtube(link));
+      final keys = cdp.page.fKeys;
+      await player.close();
+      cdp.page.fullscreen = false;
+      await player.seek(5);
+      expect(player.pendingFullscreen, isNull);
+      expect(cdp.page.fKeys, keys);
+      expect(player.isOpen, isFalse);
+    });
+  });
+
+  group('persistent Chromium profile', () {
+    test('lives under the data dir', () {
+      expect(chromiumProfileDir('/home/pi/.pi-tv'), '/home/pi/.pi-tv/chromium-profile');
+    });
+
+    test('Close then play reuses the same user-data-dir and keeps its contents', () async {
+      final profile = '${tmp.path}/chromium-profile';
+      await player.load(const PlayTarget.youtube(link));
+      final cookies = File('$profile/Default/Cookies')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('session');
+      await player.close();
+      expect(cookies.existsSync(), isTrue);
+
+      await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa')));
+      expect(runner.starts, hasLength(2));
+      for (final s in runner.starts) {
+        expect(s.args, contains('--user-data-dir=$profile'));
+        expect(s.args.where((a) => a.startsWith('--user-data-dir=')), hasLength(1));
+        expect(s.args.any((a) => a.contains('incognito') || a.contains('guest')), isFalse);
+      }
+      expect(cookies.readAsStringSync(), 'session');
+    });
+
+    test('a server restart after Chromium exited uses the same profile and does not wipe it', () async {
+      final profile = '${tmp.path}/chromium-profile';
+      await player.load(const PlayTarget.youtube(link));
+      final marker = File('$profile/Default/Cookies')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('session');
+      await player.stop();
+      // Chromium exits on its own (crash, reboot of the session, ...).
+      cdp.up = false;
+      runner.processes.single.exit(0);
+      await player.dispose();
+
+      player = ChromiumPlayer(
+        runner: runner,
+        display: () => wayland,
+        userDataDir: profile,
+        endpoint: cdp,
+        pollInterval: const Duration(hours: 1),
+        settleDelay: Duration.zero,
+        fullscreenTimeout: const Duration(milliseconds: 200),
+        fullscreenRetryDelay: const Duration(milliseconds: 5),
+      );
+      await player.load(const PlayTarget.youtube(link));
+      expect(runner.starts, hasLength(2));
+      expect(runner.starts.last.args, contains('--user-data-dir=$profile'));
+      expect(marker.readAsStringSync(), 'session');
+    });
   });
 }
