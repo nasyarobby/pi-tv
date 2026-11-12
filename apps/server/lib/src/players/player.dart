@@ -94,6 +94,10 @@ abstract class Player {
   /// Toggles subtitles; returns the new visibility when known.
   Future<bool?> toggleSubtitles();
 
+  /// Manual fullscreen toggle from a remote (YouTube: one `f` keystroke).
+  /// Never called automatically.
+  Future<void> toggleFullscreen();
+
   /// Exits fullscreen and tears the window down. Only called for an explicit
   /// Close from a remote, or when switching to the other player.
   Future<void> close();

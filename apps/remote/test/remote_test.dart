@@ -94,6 +94,36 @@ void main() {
     expect(find.textContaining('Nothing playing'), findsWidgets);
   });
 
+  testWidgets('Fullscreen button sends the fullscreen control for YouTube only', (t) async {
+    final s = FakePiServer();
+    await boot(t, s);
+    await enterPin(t, '012345');
+    await t.enterText(find.byKey(const ValueKey('url-input')), 'https://youtu.be/dQw4w9WgXcQ');
+    await t.tap(find.byKey(const ValueKey('url-play')));
+    await t.pumpAndSettle();
+    await t.pump(const Duration(seconds: 6));
+    await t.pumpAndSettle();
+    final fs = find.byKey(const ValueKey('np-fullscreen'));
+    expect(fs, findsOneWidget);
+    await t.ensureVisible(fs);
+    await t.tap(fs);
+    await t.pumpAndSettle();
+    final controls = s.requests.where((r) => r.url.path == '/api/control').toList();
+    expect(controls, hasLength(1));
+    expect(controls.single.body, contains('"action":"fullscreen"'));
+
+    // A local file (mpv): no fullscreen button.
+    await t.tap(find.text('Library'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Film One'));
+    await t.pumpAndSettle();
+    await t.tap(find.byKey(const ValueKey('lib-play-now')));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Now playing').first);
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('np-fullscreen')), findsNothing);
+  });
+
   testWidgets('Rescan button asks the server to rescan and refreshes the listing', (t) async {
     final s = FakePiServer();
     s.pendingFiles = [

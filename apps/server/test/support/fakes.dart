@@ -156,6 +156,9 @@ class FakePlayer implements Player {
   }
 
   @override
+  Future<void> toggleFullscreen() async => calls.add('fullscreen');
+
+  @override
   Future<void> close() async {
     calls.add('close');
     closes++;
@@ -201,20 +204,10 @@ class FakeYouTubePage {
   bool fullscreen = false;
   bool autoplayBlocked = false;
 
-  /// "f" does nothing (e.g. YouTube did not get the key).
-  bool ignoreFKey = false;
-
-  /// `requestFullscreen()` is rejected.
-  bool rejectRequestFullscreen = false;
-
-  /// The fullscreen element does not cover the screen (e.g. the window is
-  /// not the whole output yet).
-  bool fullscreenCoversScreen = true;
-
-  /// The player element is not ready for this many more state reads.
-  int notReadyReads = 0;
   int fKeys = 0;
-  int requestFullscreenCalls = 0;
+
+  /// Viewport/screen reported by the page.
+  List<num> view = [1920, 1080, 1920, 1080, 1];
   double volume = 100;
   bool muted = false;
   String title = 'YouTube';
@@ -225,8 +218,6 @@ class FakeYouTubePage {
   }
 
   Map<String, Object?> state() {
-    final ready = hasVideo && notReadyReads <= 0;
-    if (notReadyReads > 0) notReadyReads--;
     return {
       'vid': vid,
       'url': url,
@@ -240,8 +231,9 @@ class FakeYouTubePage {
       'vol': volume,
       'muted': muted,
       'fs': fullscreen,
-      'full': fullscreen && fullscreenCoversScreen && hasVideo,
-      'ready': ready,
+      'view': view,
+      'box': hasVideo ? [0, 0, view[0], view[1]] : null,
+      'ready': hasVideo,
       'error': false,
     };
   }
@@ -279,7 +271,7 @@ class FakeCdpSession implements CdpSession {
         if (params['type'] == 'keyDown') endpoint.keys.add(params['key'] as String);
         if (params['type'] == 'keyDown' && params['key'] == 'f') {
           page.fKeys++;
-          if (!page.ignoreFKey) page.fullscreen = !page.fullscreen;
+          page.fullscreen = !page.fullscreen;
         }
         return {};
       case 'Input.dispatchMouseEvent':
@@ -291,10 +283,12 @@ class FakeCdpSession implements CdpSession {
         endpoint.onBrowserClose?.call();
         return {};
       case 'Browser.getWindowForTarget':
-        return {
-          'windowId': 1,
-          'bounds': {'windowState': 'fullscreen'}
-        };
+        return {'windowId': 1, 'bounds': Map<String, Object?>.of(endpoint.windowBounds)};
+      case 'Browser.setWindowBounds':
+        final b = (params['bounds']! as Map).cast<String, Object?>();
+        endpoint.setBounds.add(b);
+        endpoint.windowBounds.addAll(b);
+        return {};
       case 'Runtime.evaluate':
         return {
           'result': {'value': _evaluate(params['expression'] as String, params['userGesture'] == true)}
@@ -338,11 +332,6 @@ class FakeCdpSession implements CdpSession {
       case 'exitfs':
         page.fullscreen = false;
         return true;
-      case 'fullscreen':
-        page.requestFullscreenCalls++;
-        if (page.rejectRequestFullscreen) return false;
-        page.fullscreen = true;
-        return true;
       case 'rect':
         return jsonEncode({'x': 100, 'y': 100});
     }
@@ -362,6 +351,17 @@ class FakeCdpEndpoint implements CdpEndpoint {
   final List<String> log = [];
   final List<String> keys = [];
   void Function()? onBrowserClose;
+
+  /// What `Browser.getWindowForTarget` reports; `Browser.setWindowBounds`
+  /// calls are recorded in [setBounds] and merged into it.
+  final Map<String, Object?> windowBounds = {
+    'left': 0,
+    'top': 0,
+    'width': 1920,
+    'height': 1080,
+    'windowState': 'fullscreen'
+  };
+  final List<Map<String, Object?>> setBounds = [];
 
   @override
   Future<Map<String, Object?>?> version() async =>

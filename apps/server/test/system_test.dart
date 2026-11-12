@@ -64,6 +64,60 @@ void main() {
     });
   });
 
+  group('output size', () {
+    test('wlr-randr: current mode of the enabled output at 0,0', () {
+      const text = '''
+HDMI-A-1 "Samsung Electric Company SAMSUNG 0x01000E00 (HDMI-A-1)"
+  Make: Samsung Electric Company
+  Model: SAMSUNG
+  Enabled: yes
+  Modes:
+    4096x2160 px, 24.000000 Hz
+    3840x2160 px, 30.000000 Hz (preferred)
+    1920x1080 px, 60.000000 Hz (current)
+    1280x720 px, 60.000000 Hz
+  Position: 0,0
+  Transform: normal
+  Scale: 1.000000
+  Adaptive Sync: disabled
+HDMI-A-2 "Unknown"
+  Enabled: no
+  Modes:
+    1024x768 px, 60.000000 Hz (preferred)
+''';
+      expect(parseWlrRandr(text), const OutputSize(1920, 1080));
+    });
+
+    test('wlr-randr: scale and rotation give the logical size', () {
+      expect(
+          parseWlrRandr('X "y"\n  Enabled: yes\n  Modes:\n    3840x2160 px, 60.000000 Hz (preferred, current)\n'
+              '  Position: 0,0\n  Transform: normal\n  Scale: 2.000000\n'),
+          const OutputSize(1920, 1080));
+      expect(parseWlrRandr('X "y"\n  Enabled: yes\n  Modes:\n    1920x1080 px (current)\n  Transform: 90\n'),
+          const OutputSize(1080, 1920));
+      expect(parseWlrRandr(''), isNull);
+    });
+
+    test('xrandr: screen current size', () {
+      expect(parseXrandr('Screen 0: minimum 320 x 200, current 1920 x 1080, maximum 8192 x 8192\n'),
+          const OutputSize(1920, 1080));
+      expect(parseXrandr('nothing'), isNull);
+    });
+
+    test('detectOutputSize runs wlr-randr on Wayland and xrandr on X11', () async {
+      final runner = FakeRunner(available: {'wlr-randr', 'xrandr'});
+      runner.onRun = (c) => c.exe.endsWith('wlr-randr')
+          ? const CommandResult(
+              0, 'HDMI-A-1 "TV"\n  Enabled: yes\n  Modes:\n    1920x1080 px, 60.000000 Hz (current)\n', '')
+          : const CommandResult(0, 'Screen 0: minimum 8 x 8, current 1280 x 720, maximum 8 x 8', '');
+      expect(await detectOutputSize(runner, const DisplayEnvironment(DisplayKind.wayland, waylandDisplay: 'wayland-0')),
+          const OutputSize(1920, 1080));
+      expect(await detectOutputSize(runner, const DisplayEnvironment(DisplayKind.x11, x11Display: ':0')),
+          const OutputSize(1280, 720));
+      expect(await detectOutputSize(FakeRunner(), const DisplayEnvironment(DisplayKind.wayland)), isNull);
+    });
+  });
+
   group('screen blank inhibit', () {
     test('Wayland: logind idle lock + pause swayidle, released on release', () async {
       final r = FakeRunner(available: {'systemd-inhibit', 'pkill', 'wlopm'});

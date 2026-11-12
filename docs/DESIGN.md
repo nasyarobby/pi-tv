@@ -5,16 +5,29 @@
 * One item plays at a time. `PlaybackController` owns the queue, the current
   item, history and which player is active.
 * **YouTube → Chromium (CDP).** If nothing answers on `CDP_PORT`, the server
-  starts `chromium --start-fullscreen --remote-debugging-port=<port>
-  --user-data-dir=~/.pi-tv/chromium-profile --ozone-platform=wayland|x11
-  <watch URL>` (plus `--no-first-run`, `--autoplay-policy=no-user-gesture-required`,
-  no `--kiosk`). If it answers (window already open, even from a previous
+  reads the real output size (`wlr-randr` on Wayland, `xrandr` on X11; logical
+  size = mode / scale, rotated by the transform) and starts
+  `chromium --start-fullscreen --window-position=0,0 --window-size=<W>,<H>
+  --remote-debugging-port=<port> --user-data-dir=~/.pi-tv/chromium-profile
+  --ozone-platform=wayland|x11 <watch URL>` (plus `--no-first-run`,
+  `--autoplay-policy=no-user-gesture-required`, no `--kiosk`; no size flags
+  when the size is unknown). If it answers (window already open, even from a previous
   server run) the same tab is reused. Then: `Page.navigate` to
   `https://www.youtube.com/watch?v=<id>&t=<s>s`, bring to front, play
   (`movie_player.playVideo()`; if still paused, click the Play button, then a
-  trusted mouse click), focus the player and send a trusted `f` key for
-  player fullscreen (fallback: `requestFullscreen()` with a user gesture). The
-  browser window itself is forced to `fullscreen` with `Browser.setWindowBounds`.
+  trusted mouse click). The browser window is checked once when attached: if
+  it is smaller than the output it is resized to the output, and it is put in
+  `fullscreen` with `Browser.setWindowBounds`.
+* **Full-bleed player, no automatic YouTube fullscreen.** The guard script
+  adds a stylesheet on `youtube.com/watch` pages that pins `#movie_player` to
+  the whole viewport (100vw x 100vh) and hides the masthead and side column.
+  Without it the player is only part of the window (normal layout: a box
+  beside the related videos; theater mode, which YouTube remembers in the
+  profile: full width but shorter, so the video is pillarboxed with black bars
+  left and right). The server never sends `f` or calls `requestFullscreen` by
+  itself. The remote's Fullscreen button (`POST /api/control
+  {"action":"fullscreen"}`, YouTube only) sends one trusted `f` to the focused
+  player, so the user toggles YouTube fullscreen; for mpv it is a no-op.
 * **No related autoplay.** A guard script injected on every page turns
   YouTube's autoplay toggle off, cancels the up-next countdown and records the
   real end of the video. If YouTube still navigates to another video by
@@ -66,7 +79,7 @@
 | GET | `/api/status` | | now playing |
 | WS | `/ws` | | pushes `{type: status|queue|history|library|error}`; accepts `{type:"control", action, value}` |
 | POST | `/api/play` | `{url? , localPath?, startSeconds?, mode: now|queue}` | `{item, status}`; 400 for non-YouTube URL / file outside the library |
-| POST | `/api/control` | `{action, value?}` — `play pause toggle stop close seek seekRelative volume mute next prev subtitles` | `{ok, status}` |
+| POST | `/api/control` | `{action, value?}` — `play pause toggle stop close seek seekRelative volume mute next prev subtitles fullscreen` | `{ok, status}` |
 | GET | `/api/queue` | | `{items}` |
 | PUT | `/api/queue` | `{order:[ids]}` or `{id, index}` | `{items}` |
 | DELETE | `/api/queue` / `/api/queue/<id>` | | clear / remove |
@@ -121,7 +134,8 @@ setup/login is kept and offered right after login.
   rescan over HTTP refreshes the listing; queue mix + auto-advance,
   end-when-empty keeps the window and loads nothing, Stop vs Close, switching
   closes the other player, inhibit/CEC rules; Chromium CDP flow against a
-  fake CDP endpoint (flags, reuse, `f`, autoplay-blocked click, related-video
+  fake CDP endpoint (flags, output-sized window, no automatic `f`, manual fullscreen toggle,
+  full-bleed stylesheet, reuse, autoplay-blocked click, related-video
   return, Close); mpv IPC against a fake socket; display detection; inhibit
   and CEC command lines; config parsing.
 * `apps/remote/test`: keypad, login, paste/validate, Stop/Close, Rescan,

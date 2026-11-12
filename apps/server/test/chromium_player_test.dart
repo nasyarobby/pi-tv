@@ -30,9 +30,7 @@ void main() {
       endpoint: cdp,
       pollInterval: const Duration(hours: 1),
       settleDelay: Duration.zero,
-      fullscreenTimeout: const Duration(milliseconds: 200),
-      fullscreenRetryDelay: const Duration(milliseconds: 5),
-      fullscreenReapplyInterval: Duration.zero,
+      outputSize: (_) async => const OutputSize(1920, 1080),
     );
   });
 
@@ -49,6 +47,9 @@ void main() {
     final c = runner.starts.single;
     expect(c.exe, '/usr/bin/chromium');
     expect(c.args, contains('--start-fullscreen'));
+    expect(c.args, contains('--window-position=0,0'));
+    expect(c.args, contains('--window-size=1920,1080'));
+    expect(c.args.any((a) => a.startsWith('--force-device-scale-factor')), isFalse);
     expect(c.args, contains('--remote-debugging-port=9333'));
     expect(c.args, contains('--user-data-dir=${tmp.path}/chromium-profile'));
     expect(c.args, contains('--ozone-platform=wayland'));
@@ -63,14 +64,65 @@ void main() {
     expect(args, isNot(contains('--ozone-platform=wayland')));
   });
 
-  test('navigates, starts playback and sends "f" for player fullscreen', () async {
+  test('navigates and starts playback, without sending "f" or requesting fullscreen', () async {
     await player.load(const PlayTarget.youtube(link));
     expect(cdp.log, contains('Page.navigate'));
     expect(cdp.log, contains('Page.addScriptToEvaluateOnNewDocument'));
-    expect(cdp.keys, contains('f'));
-    expect(cdp.page.fullscreen, isTrue);
+    expect(cdp.keys, isNot(contains('f')));
+    expect(cdp.page.fKeys, 0);
+    expect(cdp.page.fullscreen, isFalse);
+    expect(cdp.log, isNot(contains('eval:fullscreen')));
     expect(cdp.page.paused, isFalse);
     expect(player.snapshot.paused, isFalse);
+  });
+
+  test('the window size follows the detected output, not a hard-coded 1920x1080', () async {
+    player = ChromiumPlayer(
+      runner: runner,
+      display: () => wayland,
+      userDataDir: '${tmp.path}/chromium-profile',
+      endpoint: cdp,
+      pollInterval: const Duration(hours: 1),
+      settleDelay: Duration.zero,
+      outputSize: (_) async => const OutputSize(3840, 2160),
+    );
+    cdp.windowBounds.addAll({'width': 3840, 'height': 2160});
+    await player.load(const PlayTarget.youtube(link));
+    expect(runner.starts.single.args, contains('--window-size=3840,2160'));
+    expect(player.outputSize, const OutputSize(3840, 2160));
+  });
+
+  test('unknown output size: no window-size flag, still --start-fullscreen', () {
+    final args = player.launchArgs(wayland, 'u');
+    expect(args, contains('--start-fullscreen'));
+    expect(args.any((a) => a.startsWith('--window-size')), isFalse);
+  });
+
+  test('a window smaller than the output is resized to the output, then made fullscreen', () async {
+    cdp.windowBounds.addAll({'width': 1440, 'height': 1080, 'windowState': 'normal'});
+    await player.load(const PlayTarget.youtube(link));
+    expect(cdp.setBounds, [
+      {'left': 0, 'top': 0, 'width': 1920, 'height': 1080},
+      {'windowState': 'fullscreen'},
+    ]);
+  });
+
+  test('a fullscreen window at the output size is left alone', () async {
+    await player.load(const PlayTarget.youtube(link));
+    await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa')));
+    expect(cdp.setBounds, isEmpty);
+  });
+
+  test('the guard script makes the YouTube player full-bleed on watch pages', () {
+    expect(youtubeGuardScript, contains('pitv-fullbleed'));
+    expect(youtubeGuardScript, isNot(contains('PITV_FULL_BLEED_CSS')));
+    expect(youtubeGuardScript, contains(r'#movie_player { position: fixed !important;'));
+    expect(youtubeFullBleedCss, contains('width: 100vw !important; height: 100vh !important;'));
+    // Hides the page chrome that made the player a partial box (sidebar,
+    // masthead), and never forces fullscreen itself.
+    expect(youtubeFullBleedCss, contains('#secondary'));
+    expect(youtubeFullBleedCss, contains('#masthead-container'));
+    expect(youtubeGuardScript, isNot(contains('requestFullscreen')));
   });
 
   test('clicks Play when autoplay is blocked', () async {
@@ -164,105 +216,55 @@ void main() {
     expect((await closed).open, isFalse);
   });
 
-  group('YouTube player fullscreen', () {
-    test('waits for the player to be ready, then sends "f" and verifies it covers the screen', () async {
-      cdp.page.notReadyReads = 12;
+  group('YouTube fullscreen is manual only', () {
+    test('no "f" on load, on the next queue item, or from the poll loop', () async {
       await player.load(const PlayTarget.youtube(link));
-      expect(cdp.page.notReadyReads, 0);
-      expect(cdp.page.fKeys, 1);
-      expect(cdp.page.fullscreen, isTrue);
-      expect(cdp.page.requestFullscreenCalls, 0);
-      final focus = cdp.log.lastIndexOf('eval:focus');
-      expect(focus, greaterThan(cdp.log.indexOf('eval:play')));
-      expect(focus, lessThan(cdp.log.lastIndexOf('Input.dispatchKeyEvent')));
-    });
-
-    test('falls back to requestFullscreen when "f" does not take', () async {
-      cdp.page.ignoreFKey = true;
-      await player.load(const PlayTarget.youtube(link));
-      expect(cdp.page.fKeys, 1);
-      expect(cdp.page.requestFullscreenCalls, 1);
-      expect(cdp.page.fullscreen, isTrue);
-    });
-
-    test('retries until the fullscreen element really covers the screen', () async {
-      cdp.page.fullscreenCoversScreen = false;
-      final load = player.load(const PlayTarget.youtube(link));
-      await Future<void>.delayed(const Duration(milliseconds: 40));
-      cdp.page.fullscreenCoversScreen = true;
-      await load;
-      expect(cdp.page.fullscreen, isTrue);
-      expect(cdp.page.state()['full'], isTrue);
-      // It kept trying, and exited the partial fullscreen before each new
-      // "f" so the toggle never turned the real one off.
-      expect(cdp.page.fKeys, greaterThan(1));
-      expect(cdp.log, contains('eval:exitfs'));
-    });
-
-    test('a failed attempt does not break playback, and the poll loop retries', () async {
-      cdp.page
-        ..ignoreFKey = true
-        ..rejectRequestFullscreen = true;
-      await player.load(const PlayTarget.youtube(link));
-      expect(cdp.page.fullscreen, isFalse);
-      expect(player.isOpen, isTrue);
-      expect(cdp.page.paused, isFalse);
-      cdp.page.rejectRequestFullscreen = false;
-      await player.setVolume(50); // runs a poll
-      await player.pendingFullscreen;
-      expect(cdp.page.fullscreen, isTrue);
-    });
-
-    test('is re-applied when the next queue item starts', () async {
-      await player.load(const PlayTarget.youtube(link));
-      expect(cdp.page.fullscreen, isTrue);
       await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa')));
-      expect(cdp.page.vid, 'aaaaaaaaaaa');
+      for (var i = 0; i < 5; i++) {
+        await player.seek(i.toDouble()); // each control runs a poll
+      }
+      cdp.page.url = 'https://www.youtube.com/watch?v=RELATED0000';
+      await player.pause(); // poll returns to the ended video
+      await player.pause();
+      expect(cdp.page.fKeys, 0);
+      expect(cdp.page.fullscreen, isFalse);
+      expect(cdp.log, isNot(contains('eval:fullscreen')));
+    });
+
+    test('toggleFullscreen sends exactly one "f" to the focused player each time', () async {
+      await player.load(const PlayTarget.youtube(link));
+      await player.toggleFullscreen();
+      expect(cdp.page.fKeys, 1);
+      expect(cdp.page.fullscreen, isTrue);
+      final focus = cdp.log.lastIndexOf('eval:focus');
+      expect(focus, greaterThan(-1));
+      expect(focus, lessThan(cdp.log.lastIndexOf('Input.dispatchKeyEvent')));
+      // The poll loop leaves it alone.
+      await player.seek(3);
+      expect(cdp.page.fKeys, 1);
+      await player.toggleFullscreen();
       expect(cdp.page.fKeys, 2);
-      expect(cdp.page.fullscreen, isTrue);
+      expect(cdp.page.fullscreen, isFalse);
+      await player.seek(4);
+      expect(cdp.page.fKeys, 2);
+      expect(cdp.page.fullscreen, isFalse);
     });
 
-    test('the poll loop puts the player back when it falls out of fullscreen', () async {
-      await player.load(const PlayTarget.youtube(link));
-      cdp.page.fullscreen = false;
-      await player.seek(10);
-      await player.pendingFullscreen;
-      expect(cdp.page.fullscreen, isTrue);
-      expect(cdp.page.t, 10);
+    test('toggleFullscreen without a window does nothing', () async {
+      await player.toggleFullscreen();
+      expect(cdp.keys, isEmpty);
+      expect(runner.starts, isEmpty);
     });
 
-    test('Stop stays paused, fullscreen and open', () async {
+    test('Stop leaves the window open and does not touch fullscreen', () async {
       await player.load(const PlayTarget.youtube(link));
+      await player.toggleFullscreen();
       await player.stop();
-      await player.pendingFullscreen;
       expect(cdp.page.paused, isTrue);
       expect(cdp.page.fullscreen, isTrue);
+      expect(cdp.page.fKeys, 1);
       expect(cdp.browserClosed, isFalse);
       expect(player.isOpen, isTrue);
-    });
-
-    test('after YouTube autoplays a related video, the ended video is fullscreen again and paused', () async {
-      await player.load(const PlayTarget.youtube(link));
-      cdp.page.url = 'https://www.youtube.com/watch?v=RELATED0000';
-      await player.pause(); // poll: returns to the ended video (navigation drops fullscreen)
-      expect(cdp.page.vid, 'dQw4w9WgXcQ');
-      await player.pause(); // next poll re-applies fullscreen
-      await player.pendingFullscreen;
-      expect(cdp.page.fullscreen, isTrue);
-      expect(cdp.page.paused, isTrue);
-      expect(cdp.page.vid, 'dQw4w9WgXcQ');
-      expect(player.snapshot.ended, isTrue);
-    });
-
-    test('Close stops re-applying fullscreen', () async {
-      await player.load(const PlayTarget.youtube(link));
-      final keys = cdp.page.fKeys;
-      await player.close();
-      cdp.page.fullscreen = false;
-      await player.seek(5);
-      expect(player.pendingFullscreen, isNull);
-      expect(cdp.page.fKeys, keys);
-      expect(player.isOpen, isFalse);
     });
   });
 
@@ -309,8 +311,7 @@ void main() {
         endpoint: cdp,
         pollInterval: const Duration(hours: 1),
         settleDelay: Duration.zero,
-        fullscreenTimeout: const Duration(milliseconds: 200),
-        fullscreenRetryDelay: const Duration(milliseconds: 5),
+        outputSize: (_) async => const OutputSize(1920, 1080),
       );
       await player.load(const PlayTarget.youtube(link));
       expect(runner.starts, hasLength(2));

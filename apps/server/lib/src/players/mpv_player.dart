@@ -320,6 +320,11 @@ class MpvPlayer implements Player {
   @override
   Future<void> setMuted(bool muted) async => _cmd(['set_property', 'mute', muted]);
 
+  /// mpv already runs `--fullscreen`; the remote only offers the toggle for
+  /// YouTube, so this is a no-op (it must never reach Chromium either).
+  @override
+  Future<void> toggleFullscreen() async {}
+
   @override
   Future<bool?> toggleSubtitles() async {
     await _cmd(['cycle', 'sub-visibility']);

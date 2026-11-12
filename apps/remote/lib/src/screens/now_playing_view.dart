@@ -168,6 +168,14 @@ class _NowPlayingViewState extends State<NowPlayingView> {
                       },
                     ),
                   ),
+                  if (item?.kind == MediaKind.youtube)
+                    IconButton(
+                      key: const ValueKey('np-fullscreen'),
+                      iconSize: 30,
+                      tooltip: 'Fullscreen on the TV (toggle)',
+                      onPressed: has ? () => _run(() => app.control(ControlAction.fullscreen)) : null,
+                      icon: const Icon(Icons.fullscreen),
+                    ),
                   if (item?.kind == MediaKind.local)
                     IconButton(
                       iconSize: 30,

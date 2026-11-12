@@ -289,6 +289,8 @@ class PiTvApi {
         await playback.previous();
       case ControlAction.subtitles:
         await playback.toggleSubtitles();
+      case ControlAction.fullscreen:
+        await playback.toggleFullscreen();
     }
   }
 

@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import 'process.dart';
+
 enum DisplayKind { wayland, x11, none }
 
 /// The graphical session the TV players should attach to.
@@ -144,4 +146,106 @@ class DisplayDetector {
     }
     return wayland() ?? x11() ?? DisplayEnvironment(DisplayKind.none, runtimeDir: rt);
   }
+}
+
+/// Logical size of the TV output in CSS/DIP pixels (mode / scale, rotated
+/// by the transform), which is what a fullscreen Chromium window covers.
+class OutputSize {
+  const OutputSize(this.width, this.height);
+  final int width;
+  final int height;
+
+  @override
+  bool operator ==(Object other) => other is OutputSize && other.width == width && other.height == height;
+  @override
+  int get hashCode => Object.hash(width, height);
+  @override
+  String toString() => '${width}x$height';
+}
+
+/// Parses `wlr-randr` text output (labwc, wayfire, sway...). Picks the
+/// enabled output at position 0,0 (else the first enabled one).
+OutputSize? parseWlrRandr(String text) {
+  final outputs = <Map<String, Object?>>[];
+  Map<String, Object?>? cur;
+  var inModes = false;
+  for (final raw in text.split(RegExp(r'\r?\n'))) {
+    if (raw.trim().isEmpty) continue;
+    if (!raw.startsWith(' ') && !raw.startsWith('\t')) {
+      cur = {'enabled': true, 'scale': 1.0, 'transform': 'normal', 'pos': '0,0'};
+      outputs.add(cur);
+      inModes = false;
+      continue;
+    }
+    if (cur == null) continue;
+    final line = raw.trim();
+    final kv = RegExp(r'^([A-Za-z ]+):\s*(.*)$').firstMatch(line);
+    if (kv != null && !RegExp(r'^\d').hasMatch(line)) {
+      final key = kv.group(1)!.toLowerCase();
+      final value = kv.group(2)!.trim();
+      inModes = key == 'modes';
+      switch (key) {
+        case 'enabled':
+          cur['enabled'] = value == 'yes';
+        case 'scale':
+          cur['scale'] = double.tryParse(value) ?? 1.0;
+        case 'transform':
+          cur['transform'] = value;
+        case 'position':
+          cur['pos'] = value.replaceAll(' ', '');
+      }
+      continue;
+    }
+    if (inModes) {
+      final m = RegExp(r'^(\d+)x(\d+) px.*\bcurrent\b').firstMatch(line);
+      if (m != null) cur['mode'] = [int.parse(m.group(1)!), int.parse(m.group(2)!)];
+    }
+  }
+  final usable = [
+    for (final o in outputs)
+      if (o['enabled'] == true && o['mode'] != null) o
+  ];
+  if (usable.isEmpty) return null;
+  final o = usable.firstWhere((o) => o['pos'] == '0,0', orElse: () => usable.first);
+  final mode = o['mode']! as List<int>;
+  final scale = (o['scale']! as double) <= 0 ? 1.0 : o['scale']! as double;
+  var w = (mode[0] / scale).round();
+  var h = (mode[1] / scale).round();
+  final t = '${o['transform']}';
+  if (t.contains('90') || t.contains('270')) {
+    final x = w;
+    w = h;
+    h = x;
+  }
+  return OutputSize(w, h);
+}
+
+/// Parses `xrandr --current`: `Screen 0: minimum ..., current 1920 x 1080, ...`.
+OutputSize? parseXrandr(String text) {
+  final m = RegExp(r'current (\d+) x (\d+)').firstMatch(text);
+  return m == null ? null : OutputSize(int.parse(m.group(1)!), int.parse(m.group(2)!));
+}
+
+/// Reads the real output size at runtime (`wlr-randr` on Wayland,
+/// `xrandr` on X11). Null when it cannot be determined.
+Future<OutputSize?> detectOutputSize(ProcessRunner runner, DisplayEnvironment env) async {
+  final childEnv = {...Platform.environment, ...env.childEnvironment};
+  Future<String?> out(String exe, List<String> args) async {
+    final path = await runner.which(exe);
+    if (path == null) return null;
+    final r = await runner.run(path, args, environment: childEnv, timeout: const Duration(seconds: 5));
+    return r.ok ? r.stdout : null;
+  }
+
+  if (env.isWayland) {
+    final t = await out('wlr-randr', const []);
+    final s = t == null ? null : parseWlrRandr(t);
+    if (s != null) return s;
+  }
+  if (env.isX11 || env.x11Display != null) {
+    final t = await out('xrandr', const ['--current']);
+    final s = t == null ? null : parseXrandr(t);
+    if (s != null) return s;
+  }
+  return null;
 }

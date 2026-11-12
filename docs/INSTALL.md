@@ -77,7 +77,7 @@ variant is in `pi-tv.user.service`.
 
 ## Manual on-device checklist
 
-1. Play a YouTube link → Chromium opens fullscreen, the player goes fullscreen.
+1. Play a YouTube link → Chromium opens fullscreen and the video fills the whole screen (no bars left/right). The Fullscreen button on the remote toggles YouTube's own fullscreen (`f`).
 2. Let it end with an empty queue → window stays on the ended video, no related video starts.
 3. Stop → paused, window open; screen may blank again after the idle timeout.
 4. Play a local file → Chromium closes, mpv opens fullscreen with sidecar subtitles.

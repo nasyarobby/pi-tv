@@ -23,6 +23,9 @@ enum ControlAction {
   next,
   prev,
   subtitles,
+
+  /// Toggle YouTube's own fullscreen (sends `f` to Chromium). YouTube only.
+  fullscreen,
 }
 
 T _enumByName<T extends Enum>(List<T> values, Object? name, T fallback) {

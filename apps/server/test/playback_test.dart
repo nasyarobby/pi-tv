@@ -148,6 +148,18 @@ void main() {
     expect(local.isOpen, isFalse);
   });
 
+  test('fullscreen toggle goes to the open YouTube player only, never to mpv', () async {
+    await pc.toggleFullscreen(); // nothing open
+    expect(yt.calls, isNot(contains('fullscreen')));
+    await pc.playNow(ytItem());
+    await pc.toggleFullscreen();
+    expect(yt.calls.where((c) => c == 'fullscreen'), hasLength(1));
+    await pc.playNow(localItem());
+    await pc.toggleFullscreen();
+    expect(local.calls, isNot(contains('fullscreen')));
+    expect(yt.calls.where((c) => c == 'fullscreen'), hasLength(1));
+  });
+
   test('same kind back-to-back reuses the window (no close)', () async {
     await pc.playNow(ytItem('aaaaaaaaaaa'));
     await pc.playNow(ytItem('bbbbbbbbbbb'));

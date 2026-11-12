@@ -14,7 +14,7 @@ import 'player.dart';
 /// JavaScript injected into every YouTube page: records the end of the
 /// main video and keeps YouTube's "Autoplay next" off so a related video
 /// never starts by itself.
-const String youtubeGuardScript = r'''
+final String youtubeGuardScript = r'''
 /*pitv:guard*/(() => {
   if (window.__piTv) return;
   window.__piTv = { ended: false };
@@ -25,7 +25,23 @@ const String youtubeGuardScript = r'''
     const t = document.querySelector('.ytp-autonav-toggle-button[aria-checked="true"]');
     if (t) { try { t.click(); } catch (e) {} }
   };
+  const fullBleed = () => {
+    const on = /(^|\.)youtube\.com$/.test(location.hostname) && /^\/(watch|live\/)/.test(location.pathname);
+    let st = document.getElementById('pitv-fullbleed');
+    if (!st && on && document.documentElement) {
+      st = document.createElement('style');
+      st.id = 'pitv-fullbleed';
+      st.textContent = PITV_FULL_BLEED_CSS;
+      (document.head || document.documentElement).appendChild(st);
+      st.disabled = true;
+    }
+    if (st && st.disabled === on) {
+      st.disabled = !on;
+      window.dispatchEvent(new Event('resize'));
+    }
+  };
   const hook = () => {
+    fullBleed();
     const v = document.querySelector('video');
     if (v && !v.__piTvHooked) {
       v.__piTvHooked = true;
@@ -36,7 +52,29 @@ const String youtubeGuardScript = r'''
   };
   setInterval(hook, 500);
   document.addEventListener('DOMContentLoaded', hook);
+  hook();
 })();
+'''
+    .replaceFirst('PITV_FULL_BLEED_CSS', jsonEncode(youtubeFullBleedCss));
+
+/// Full-bleed layout for YouTube watch pages, injected by
+/// [youtubeGuardScript]. Without it the player only covers part of the
+/// window: the normal layout puts it in a ~1337x752 box beside the related
+/// videos, and theater mode (remembered in the persistent profile) gives a
+/// full-width but shorter box under the masthead, so the 16:9 video is
+/// pillarboxed with black bars left and right. This pins `#movie_player` to
+/// the whole viewport (= the whole output, since the window is fullscreen at
+/// the output size) and hides the page chrome. YouTube's own fullscreen (the
+/// manual `f` toggle) still works on top of it. Ancestors of the player lose
+/// transforms/containment and get a high z-index so the fixed player is not
+/// trapped in, or painted under, another stacking context; YouTube dialogs
+/// stay above it.
+const String youtubeFullBleedCss = r'''
+html, body { overflow: hidden !important; background: #000 !important; }
+#masthead-container, ytd-masthead, #secondary, #below, tp-yt-app-drawer, ytd-mini-guide-renderer { visibility: hidden !important; }
+ytd-app:has(#movie_player), ytd-app :has(#movie_player) { transform: none !important; filter: none !important; contain: none !important; will-change: auto !important; z-index: 2147483000 !important; }
+#movie_player { position: fixed !important; left: 0 !important; top: 0 !important; right: 0 !important; bottom: 0 !important; width: 100vw !important; height: 100vh !important; max-width: none !important; max-height: none !important; margin: 0 !important; border-radius: 0 !important; z-index: 2147483000 !important; background: #000 !important; }
+ytd-popup-container, tp-yt-iron-overlay-backdrop, ytd-consent-bump-v2-lightbox { z-index: 2147483647 !important; }
 ''';
 
 /// Reads player state as JSON.
@@ -62,12 +100,8 @@ const String youtubeStateScript = r'''
     d: v && isFinite(v.duration) ? v.duration : null,
     paused: v ? v.paused : true, ended, vol, muted,
     fs: !!document.fullscreenElement,
-    full: (() => {
-      if (!document.fullscreenElement || !v) return false;
-      const b = v.getBoundingClientRect();
-      return b.width >= window.innerWidth - 2 && b.height >= window.innerHeight - 2 &&
-        window.innerWidth >= screen.width - 2 && window.innerHeight >= screen.height - 2;
-    })(),
+    view: [window.innerWidth, window.innerHeight, screen.width, screen.height, window.devicePixelRatio],
+    box: (() => { if (!v) return null; const b = v.getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; })(),
     ready: !!v && !!p,
     error: !!(document.querySelector('.ytp-error') && document.querySelector('.ytp-error').offsetParent !== null),
   });
@@ -83,13 +117,13 @@ String _cmd(String marker, String body) => '/*pitv:$marker*/(() => { $body })()'
 
 /// YouTube in the system Chromium, driven over CDP.
 ///
-/// Never kiosk: a normal Chromium window with a dedicated
-/// `--user-data-dir` (persistent, so a Google sign-in survives Close and
-/// restarts), started with `--start-fullscreen`, then the YouTube player
-/// itself is made fullscreen with the `f` shortcut (falling back to
-/// `requestFullscreen`). Player fullscreen is verified by geometry (the
-/// video covers the whole screen), retried until the player is ready, and
-/// re-applied by the poll loop if YouTube drops it.
+/// A normal Chromium window (no kiosk) with a dedicated, persistent
+/// `--user-data-dir` (a Google sign-in survives Close and restarts). The
+/// window is opened at the detected output size (`--window-position=0,0
+/// --window-size=WxH`) and `--start-fullscreen`; [youtubeFullBleedCss] makes
+/// the YouTube player fill that whole window. The player is never put into
+/// YouTube fullscreen automatically: [toggleFullscreen] sends one `f` when
+/// the user presses Fullscreen on a remote.
 class ChromiumPlayer implements Player {
   ChromiumPlayer({
     required ProcessRunner runner,
@@ -102,10 +136,9 @@ class ChromiumPlayer implements Player {
     this.launchTimeout = const Duration(seconds: 40),
     this.loadTimeout = const Duration(seconds: 25),
     this.settleDelay = const Duration(milliseconds: 1500),
-    this.fullscreenTimeout = const Duration(seconds: 30),
-    this.fullscreenRetryDelay = const Duration(seconds: 1),
-    this.fullscreenReapplyInterval = const Duration(seconds: 3),
+    Future<OutputSize?> Function(DisplayEnvironment env)? outputSize,
   })  : _runner = runner,
+        _outputSize = outputSize ?? ((env) => detectOutputSize(runner, env)),
         _display = display,
         _endpoint = endpoint ?? HttpCdpEndpoint(cdpPort);
 
@@ -119,14 +152,7 @@ class ChromiumPlayer implements Player {
   final Duration launchTimeout;
   final Duration loadTimeout;
   final Duration settleDelay;
-
-  /// How long [load] keeps trying to put the YouTube player fullscreen
-  /// (player still loading, ads, a sign-in prompt in the way, ...).
-  final Duration fullscreenTimeout;
-  final Duration fullscreenRetryDelay;
-
-  /// Minimum gap between re-apply attempts started by the poll loop.
-  final Duration fullscreenReapplyInterval;
+  final Future<OutputSize?> Function(DisplayEnvironment env) _outputSize;
   final _log = Log('chromium');
 
   RunningProcess? _process;
@@ -136,9 +162,7 @@ class ChromiumPlayer implements Player {
   String? _expectedId;
   bool _forcedEnded = false;
   bool _navigating = false;
-  bool _wantPlayerFullscreen = false;
-  Future<bool>? _fullscreenAttempt;
-  DateTime _lastReapply = DateTime.fromMillisecondsSinceEpoch(0);
+  OutputSize? _output;
   String? _targetId;
   PlayerSnapshot _snap = const PlayerSnapshot();
   final _snaps = StreamController<PlayerSnapshot>.broadcast();
@@ -170,9 +194,16 @@ class ChromiumPlayer implements Player {
     throw StateError('Chromium not found; set CHROMIUM_PATH');
   }
 
-  /// Launch flags. Exposed for tests/docs.
-  List<String> launchArgs(DisplayEnvironment env, String url) => [
+  /// Output size detected for the last launch (null when unknown).
+  OutputSize? get outputSize => _output;
+
+  /// Launch flags. Exposed for tests/docs. With a known [output] the window
+  /// starts at 0,0 with exactly the output's size before going fullscreen,
+  /// so it never comes up as a smaller default-sized window.
+  List<String> launchArgs(DisplayEnvironment env, String url, {OutputSize? output}) => [
         '--start-fullscreen',
+        if (output != null) '--window-position=0,0',
+        if (output != null) '--window-size=${output.width},${output.height}',
         '--remote-debugging-port=$cdpPort',
         '--user-data-dir=$userDataDir',
         '--no-first-run',
@@ -197,8 +228,12 @@ class ChromiumPlayer implements Player {
       final env = _display();
       final exe = await _resolveExecutable();
       Directory(userDataDir).createSync(recursive: true);
-      lastLaunchArgs = launchArgs(env, url);
-      _log.info('launching $exe on $env');
+      _output = await _outputSize(env).catchError((Object e) {
+        _log.debug('output size: $e');
+        return null;
+      });
+      lastLaunchArgs = launchArgs(env, url, output: _output);
+      _log.info('launching $exe on $env, output ${_output ?? 'size unknown'}');
       final proc =
           await _runner.start(exe, lastLaunchArgs, environment: {...Platform.environment, ...env.childEnvironment});
       _process = proc;
@@ -259,26 +294,45 @@ class ChromiumPlayer implements Player {
     _emit(_snap.copyWith(open: true));
   }
 
+  /// One-shot when the window is (re)attached: make the Chromium window
+  /// fullscreen and, if it is smaller than the output, resize it to the
+  /// output first. This is the browser window, not YouTube fullscreen.
   Future<void> _ensureWindowFullscreen(String? targetId) async {
     final page = _page;
     if (page == null || targetId == null) return;
     try {
       final w = await page.send('Browser.getWindowForTarget', {'targetId': targetId});
       final id = w['windowId'];
-      final bounds = (w['bounds'] as Map?)?.cast<String, Object?>();
-      if (id is int && bounds?['windowState'] != 'fullscreen') {
+      if (id is! int) return;
+      final bounds = (w['bounds'] as Map?)?.cast<String, Object?>() ?? const {};
+      final out = _output;
+      final width = (bounds['width'] as num?)?.toInt();
+      final height = (bounds['height'] as num?)?.toInt();
+      final small = out != null && width != null && height != null && (width < out.width || height < out.height);
+      if (bounds['windowState'] == 'fullscreen' && !small) return;
+      if (small) {
+        _log.warn('Chromium window is ${width}x$height, output is $out; resizing it to the output');
+        if (bounds['windowState'] != 'normal') {
+          await page.send('Browser.setWindowBounds', {
+            'windowId': id,
+            'bounds': {'windowState': 'normal'},
+          });
+        }
         await page.send('Browser.setWindowBounds', {
           'windowId': id,
-          'bounds': {'windowState': 'fullscreen'},
+          'bounds': {'left': 0, 'top': 0, 'width': out.width, 'height': out.height},
         });
       }
+      await page.send('Browser.setWindowBounds', {
+        'windowId': id,
+        'bounds': {'windowState': 'fullscreen'},
+      });
     } on CdpException catch (e) {
       _log.debug('window fullscreen: $e');
     }
   }
 
   void _onWindowGone() {
-    _wantPlayerFullscreen = false;
     _poll?.cancel();
     _poll = null;
     _page = null;
@@ -347,8 +401,7 @@ class ChromiumPlayer implements Player {
       await _waitForVideo(link.videoId);
       await _eval(youtubeGuardScript);
       await _startPlayback();
-      _wantPlayerFullscreen = true;
-      await _ensurePlayerFullscreen(fullscreenTimeout);
+      await _logGeometry();
     } finally {
       _navigating = false;
     }
@@ -387,105 +440,52 @@ class ChromiumPlayer implements Player {
     }
   }
 
-  /// Completes when a fullscreen attempt started by the poll loop is done
-  /// (null when none is running). For tests.
-  Future<bool>? get pendingFullscreen => _fullscreenAttempt;
-
-  /// Puts the YouTube player itself fullscreen and verifies it by geometry.
-  /// Retries until [timeout] while the player is not ready yet.
-  Future<bool> _ensurePlayerFullscreen(Duration timeout) async {
-    // Let an attempt started by the poll loop (maybe for the previous
-    // item) finish, then try for the current one.
-    final running = _fullscreenAttempt;
-    if (running != null) await running.catchError((Object _) => false);
-    if (_fullscreenAttempt != null) return _fullscreenAttempt!;
-    final f = _fullscreenLoop(timeout);
-    _fullscreenAttempt = f;
+  /// Logs the viewport and video size against the screen, so a player that
+  /// does not fill the TV shows up in the log. Diagnostics only.
+  Future<void> _logGeometry() async {
     try {
-      return await f;
-    } finally {
-      if (identical(_fullscreenAttempt, f)) _fullscreenAttempt = null;
-    }
-  }
-
-  Future<bool> _fullscreenLoop(Duration timeout) async {
-    final deadline = DateTime.now().add(timeout);
-    var attempt = 0;
-    while (true) {
-      if (!_wantPlayerFullscreen || _page == null) return false;
       final s = await _state();
-      if (s != null && s['full'] == true) {
-        if (attempt > 0) _log.info('YouTube player is fullscreen');
-        return true;
+      final view = s?['view'];
+      final box = s?['box'];
+      if (view is! List || view.length < 4) return;
+      String n(Object? v) => (v as num?)?.round().toString() ?? '?';
+      final msg = 'viewport ${n(view[0])}x${n(view[1])}, screen ${n(view[2])}x${n(view[3])}'
+          '${view.length > 4 ? ' @${view[4]}x' : ''}'
+          '${box is List && box.length == 4 ? ', video ${n(box[2])}x${n(box[3])} at ${n(box[0])},${n(box[1])}' : ''}'
+          '${_output != null ? ', output $_output' : ''}';
+      final full = box is List &&
+          box.length == 4 &&
+          (box[2] as num) >= (view[0] as num) - 2 &&
+          (box[3] as num) >= (view[1] as num) - 2 &&
+          (view[0] as num) >= (view[2] as num) - 2 &&
+          (view[1] as num) >= (view[3] as num) - 2;
+      if (full) {
+        _log.info(msg);
+      } else {
+        _log.warn('YouTube video does not fill the screen: $msg');
       }
-      final ready = s != null && s['ready'] == true && (_expectedId == null || s['vid'] == _expectedId);
-      if (ready && await _fullscreenOnce(s, ++attempt)) {
-        _log.info('YouTube player is fullscreen');
-        return true;
-      }
-      if (!DateTime.now().isBefore(deadline)) {
-        if (timeout > Duration.zero) {
-          _log.warn('YouTube player is not fullscreen after ${timeout.inSeconds}s '
-              '(${ready ? 'attempts: $attempt' : 'player not ready'}); the poll loop keeps trying');
-        }
-        return false;
-      }
-      await Future<void>.delayed(fullscreenRetryDelay);
+    } catch (e) {
+      _log.debug('geometry: $e');
     }
   }
 
-  Future<void> _exitDocumentFullscreen() async {
-    await _eval(_cmd('exitfs', 'if (document.fullscreenElement) document.exitFullscreen(); return true;'));
-    await Future<void>.delayed(settleDelay);
-  }
-
-  /// One attempt: window fullscreen + focus, `f`, then `requestFullscreen`.
-  Future<bool> _fullscreenOnce(Map<String, Object?> s, int attempt) async {
+  /// Manual fullscreen from a remote: one `f` keystroke to the YouTube
+  /// player (YouTube's own toggle). Never sent automatically.
+  @override
+  Future<void> toggleFullscreen() async {
     final page = _page;
-    if (page == null) return false;
-    await _ensureWindowFullscreen(_targetId);
+    if (page == null || page.isClosed) return;
     try {
       await page.send('Page.bringToFront');
     } on CdpException catch (_) {}
-    // Something is fullscreen but it does not cover the screen: leave it
-    // first, because "f" toggles and would otherwise turn it off.
-    if (s['fs'] == true) await _exitDocumentFullscreen();
     // YouTube ignores shortcuts while an input (e.g. the search box) has
     // focus, so blur it and focus the player first.
     await _eval(_cmd('focus', '''
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       const p = document.getElementById('movie_player'); if (p) { p.focus(); } return !!p;'''));
-    if (!_wantPlayerFullscreen) return false;
+    _log.info('fullscreen toggle (f) from remote');
     await _key('f', 'KeyF', 70);
-    await Future<void>.delayed(settleDelay);
-    var now = await _state();
-    if (now != null && now['full'] == true) return true;
-    _log.info('"f" did not make the player fullscreen (attempt $attempt), using requestFullscreen');
-    if (!_wantPlayerFullscreen) return false;
-    if (now != null && now['fs'] == true) await _exitDocumentFullscreen();
-    await _eval(_cmd('fullscreen', '''
-      const p = document.getElementById('movie_player') || document.querySelector('video');
-      if (p && p.requestFullscreen) { return p.requestFullscreen().then(() => true, () => false); } return false;'''),
-        userGesture: true);
-    await Future<void>.delayed(settleDelay);
-    now = await _state();
-    return now != null && now['full'] == true;
-  }
-
-  /// Called by the poll loop: if the player fell out of fullscreen (YouTube
-  /// re-rendered, an ad or dialog, a window state change), put it back.
-  void _maybeReapplyFullscreen(Map<String, Object?> s) {
-    if (!_wantPlayerFullscreen || _navigating || _fullscreenAttempt != null) return;
-    if (s['full'] == true || s['ready'] != true) return;
-    if (_expectedId != null && s['vid'] != _expectedId) return;
-    final now = DateTime.now();
-    if (now.difference(_lastReapply) < fullscreenReapplyInterval) return;
-    _lastReapply = now;
-    _log.info('YouTube player is not fullscreen; re-applying');
-    unawaited(_ensurePlayerFullscreen(Duration.zero).catchError((Object e) {
-      _log.debug('re-apply fullscreen: $e');
-      return false;
-    }));
+    await _tick();
   }
 
   void _startPolling() {
@@ -507,7 +507,6 @@ class ChromiumPlayer implements Player {
         await _returnToEnded(expected);
         return;
       }
-      _maybeReapplyFullscreen(s);
       if (s['error'] == true && !_snap.ended) _log.warn('YouTube player shows an error for $vid; treating it as ended');
       final ended = _forcedEnded || s['ended'] == true || s['error'] == true;
       var title = s['title'] as String?;
@@ -609,8 +608,6 @@ class ChromiumPlayer implements Player {
     _poll?.cancel();
     _poll = null;
     _expectedId = null;
-    _wantPlayerFullscreen = false;
-    await _fullscreenAttempt?.catchError((Object _) => false);
     final page = _page;
     if (page != null && !page.isClosed) {
       try {

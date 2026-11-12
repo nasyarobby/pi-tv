@@ -230,6 +230,17 @@ void main() {
       expect(h.yt.closes, 1);
     });
 
+    test('fullscreen control toggles the YouTube player and keeps it open', () async {
+      await client.play(const PlayRequest(url: 'https://youtu.be/dQw4w9WgXcQ'));
+      final s = await client.control(ControlAction.fullscreen);
+      expect(s.windowOpen, isTrue);
+      expect(h.yt.calls.where((c) => c == 'fullscreen'), hasLength(1));
+      final r =
+          await http.post(h.u('/api/control'), headers: client.authHeaders, body: jsonEncode({'action': 'fullscreen'}));
+      expect(r.statusCode, 200);
+      expect(h.yt.calls.where((c) => c == 'fullscreen'), hasLength(2));
+    });
+
     test('controls validate their values', () async {
       await client.play(const PlayRequest(url: 'https://youtu.be/dQw4w9WgXcQ'));
       expect((await client.control(ControlAction.volume, 40)).volume, 40);

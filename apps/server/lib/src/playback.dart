@@ -362,6 +362,14 @@ class PlaybackController {
   Future<void> toggleMute() => setMuted(!(_active?.snapshot.muted ?? false));
   Future<bool?> toggleSubtitles() => _serial(() async => _active?.toggleSubtitles());
 
+  /// Manual fullscreen toggle: only for an open YouTube (Chromium) player;
+  /// a no-op for local files (mpv) or when nothing is open.
+  Future<void> toggleFullscreen() => _serial(() async {
+        final a = _active;
+        if (a == null || a.kind != MediaKind.youtube || !a.isOpen) return;
+        await a.toggleFullscreen();
+      });
+
   // ---- queue editing ----
 
   void moveInQueue(String id, int index) {
