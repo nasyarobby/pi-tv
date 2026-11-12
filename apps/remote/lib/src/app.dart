@@ -6,6 +6,7 @@ import 'screens/home_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/server_setup_screen.dart';
 import 'screens/setup_info_screen.dart';
+import 'theme.dart';
 
 class PiTvApp extends StatelessWidget {
   const PiTvApp({super.key, required this.controller, this.initialRoute = '/'});
@@ -14,13 +15,7 @@ class PiTvApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xFFE53935), brightness: Brightness.dark),
-      useMaterial3: true,
-      visualDensity: VisualDensity.standard,
-      materialTapTargetSize: MaterialTapTargetSize.padded,
-      snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
-    );
+    final theme = buildPiTvTheme();
     return AppScope(
       controller: controller,
       child: MaterialApp(

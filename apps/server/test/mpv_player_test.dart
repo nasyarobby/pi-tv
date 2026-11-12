@@ -110,4 +110,36 @@ void main() {
     expect(conn.current!.commands, contains(equals(['loadfile', '/media/film.mkv', 'replace'])));
     await sock.close();
   });
+  test('closeIfRunning quits an mpv left on the socket by a previous server run', () async {
+    final server = await ServerSocket.bind(InternetAddress('${tmp.path}/mpv.sock', type: InternetAddressType.unix), 0);
+    addTearDown(server.close);
+    conn.available = true;
+    var quit = false;
+    conn.onConnect = (ipc) => ipc.onQuit = () => quit = true;
+    expect(player.isOpen, isFalse);
+    await player.closeIfRunning();
+    expect(quit, isTrue);
+    expect(runner.starts, isEmpty, reason: 'nothing is launched');
+  });
+
+  test('closeIfRunning with nothing running does nothing', () async {
+    await player.closeIfRunning();
+    expect(conn.connects, 0);
+  });
+
+  test('closeIfRunning on our own mpv quits it', () async {
+    await player.load(const PlayTarget.file('/media/film.mkv'));
+    await player.closeIfRunning();
+    expect(player.isOpen, isFalse);
+    expect(runner.processes.single.exited, isTrue);
+  });
+
+  test('mpv reports the decoded video size', () async {
+    await player.load(const PlayTarget.file('/media/film.mkv'));
+    conn.current!
+      ..property('width', 1920)
+      ..property('height', 1080);
+    expect([player.snapshot.width, player.snapshot.height], [1920, 1080]);
+    expect(conn.current!.commands, contains(equals(['observe_property', 9, 'width'])));
+  });
 }

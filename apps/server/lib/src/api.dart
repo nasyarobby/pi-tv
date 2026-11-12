@@ -214,16 +214,20 @@ class PiTvApi {
   Future<MediaItem> itemFor(PlayRequest req) async {
     if (req.url != null && req.url!.trim().isNotEmpty) {
       final parsed = YouTubeLink.parse(req.url!);
-      if (parsed == null) throw _BadRequest('Not a YouTube video link');
-      final link = req.startSeconds != null ? YouTubeLink(parsed.videoId, startSeconds: req.startSeconds) : parsed;
-      final title = await titles.title(link) ?? 'YouTube ${link.videoId}';
+      if (parsed == null) throw _BadRequest('Not a YouTube video or playlist link');
+      // A playlist (list=, index) is one queue item; it is never expanded.
+      final link = req.startSeconds != null ? parsed.withStart(req.startSeconds) : parsed;
+      final info = await titles.lookup(link);
+      final fallback = link.videoId != null ? 'YouTube ${link.videoId}' : 'YouTube playlist ${link.playlistId}';
       return MediaItem(
         id: playback.newItemId(),
         kind: MediaKind.youtube,
-        title: title,
-        source: link.videoId,
-        thumbnail: link.thumbnailUrl,
+        title: info?.title ?? fallback,
+        source: link.videoId ?? '',
+        thumbnail: link.thumbnailUrl ?? info?.thumbnail,
         startSeconds: link.startSeconds,
+        playlistId: link.playlistId,
+        playlistIndex: link.playlistIndex,
       );
     }
     if (req.localPath != null && req.localPath!.isNotEmpty) {
@@ -238,6 +242,8 @@ class PiTvApi {
         thumbnail: e.thumbnailPath,
         startSeconds: req.startSeconds,
         durationSeconds: e.durationSeconds,
+        width: e.width,
+        height: e.height,
       );
     }
     throw _BadRequest('Send a url or a localPath');

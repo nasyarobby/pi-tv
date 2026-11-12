@@ -62,4 +62,51 @@ void main() {
     expect(r.mode, PlayMode.queue);
     expect(PlayRequest.fromJson({'url': 'x'}).mode, PlayMode.now);
   });
+
+  group('resolution labels', () {
+    test('standard names', () {
+      expect(resolutionLabel(3840, 2160), '4K');
+      expect(resolutionLabel(4096, 2160), '4K');
+      expect(resolutionLabel(2560, 1440), '1440p');
+      expect(resolutionLabel(1920, 1080), '1080p');
+      expect(resolutionLabel(1080, 1920), '1080p');
+      expect(resolutionLabel(1280, 720), '720p');
+      expect(resolutionLabel(854, 480), '480p');
+      expect(resolutionLabel(640, 480), '480p');
+    });
+    test('unmatched sizes show the exact width×height; unknown is null', () {
+      expect(resolutionLabel(1920, 800), '1920×800');
+      expect(resolutionLabel(720, 576), '720×576');
+      expect(resolutionLabel(null, 1080), isNull);
+      expect(resolutionLabel(0, 0), isNull);
+    });
+    test('library entry, media item and now playing carry width/height + label', () {
+      const e =
+          LibraryEntry(id: 'a', title: 'A', path: 'm/A.mkv', folder: 'm', sizeBytes: 1, width: 3840, height: 2160);
+      final e2 = LibraryEntry.fromJson(e.toJson());
+      expect(e.toJson()['resolution'], '4K');
+      expect([e2.width, e2.height, e2.resolution], [3840, 2160, '4K']);
+      const item = MediaItem(id: '1', kind: MediaKind.local, title: 'A', source: 'a', width: 1280, height: 720);
+      expect(MediaItem.fromJson(item.toJson()).resolution, '720p');
+      const np = NowPlaying(item: item, width: 1280, height: 720);
+      final j = np.toJson();
+      expect([j['width'], j['height'], j['resolution']], [1280, 720, '720p']);
+      expect(NowPlaying.fromJson(j).resolution, '720p');
+      const yt = NowPlaying(item: MediaItem(id: '2', kind: MediaKind.youtube, title: 'Y', source: 'dQw4w9WgXcQ'));
+      expect(yt.toJson().containsKey('resolution'), isFalse);
+    });
+  });
+
+  test('a YouTube playlist item keeps its list and index through JSON', () {
+    const item = MediaItem(
+        id: '1', kind: MediaKind.youtube, title: 'P', source: 'dQw4w9WgXcQ', playlistId: 'PLx1', playlistIndex: 4);
+    final back = MediaItem.fromJson(item.toJson());
+    expect(back.isPlaylist, isTrue);
+    expect(back.youtubeLink!.watchUrl.toString(), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLx1&index=4');
+    const only = MediaItem(id: '2', kind: MediaKind.youtube, title: 'P', source: '', playlistId: 'PLx1');
+    expect(only.youtubeLink!.watchUrl.toString(), 'https://www.youtube.com/playlist?list=PLx1');
+    const np = NowPlaying(item: item, playlistPosition: 2, playlistLength: 9, canNext: true);
+    final n = NowPlaying.fromJson(np.toJson());
+    expect([n.playlistPosition, n.playlistLength, n.canNext], [2, 9, true]);
+  });
 }

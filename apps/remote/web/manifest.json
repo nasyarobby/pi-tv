@@ -3,10 +3,10 @@
     "short_name": "Pi TV",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
+    "background_color": "#121416",
+    "theme_color": "#121416",
     "description": "Pi TV remote (Android + Web)",
-    "orientation": "portrait-primary",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
         {

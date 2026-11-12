@@ -1,6 +1,8 @@
 /// JSON models exchanged between the Pi TV server and the remotes.
 library;
 
+import 'youtube_url.dart';
+
 enum MediaKind { youtube, local }
 
 /// High level state of the TV player.
@@ -47,6 +49,30 @@ ControlAction? controlActionFromName(Object? name) {
 double? _toDouble(Object? v) => v is num ? v.toDouble() : null;
 int? _toInt(Object? v) => v is num ? v.toInt() : null;
 
+/// Standard video sizes and their short names (spec §6). Either
+/// orientation counts (a 1080×1920 portrait video is still 1080p), and
+/// DCI 4K (4096×2160) is 4K as well.
+const Map<String, List<(int, int)>> standardResolutions = {
+  '4K': [(3840, 2160), (4096, 2160)],
+  '1440p': [(2560, 1440)],
+  '1080p': [(1920, 1080)],
+  '720p': [(1280, 720)],
+  '480p': [(854, 480), (640, 480), (720, 480)],
+};
+
+/// Short resolution label for a probed video size: `4K`, `1440p`, `1080p`,
+/// `720p` or `480p` when [width]×[height] is one of those sizes, otherwise
+/// the exact `width×height` (e.g. `1920×800`). `null` when unknown.
+String? resolutionLabel(int? width, int? height) {
+  if (width == null || height == null || width <= 0 || height <= 0) return null;
+  for (final e in standardResolutions.entries) {
+    for (final (w, h) in e.value) {
+      if ((width == w && height == h) || (width == h && height == w)) return e.key;
+    }
+  }
+  return '$width×$height';
+}
+
 /// One playable item (queue entry, now playing item, history entry).
 class MediaItem {
   const MediaItem({
@@ -57,6 +83,10 @@ class MediaItem {
     this.thumbnail,
     this.startSeconds,
     this.durationSeconds,
+    this.playlistId,
+    this.playlistIndex,
+    this.width,
+    this.height,
   });
 
   /// Unique id of this queue/history entry.
@@ -64,7 +94,8 @@ class MediaItem {
   final MediaKind kind;
   final String title;
 
-  /// YouTube video id, or the library id of a local file.
+  /// YouTube video id (empty for a bare playlist link), or the library id
+  /// of a local file.
   final String source;
 
   /// Absolute URL (YouTube) or server-relative path (`/api/thumb/...`).
@@ -72,7 +103,40 @@ class MediaItem {
   final int? startSeconds;
   final double? durationSeconds;
 
-  MediaItem copyWith({String? id, String? title, double? durationSeconds, String? thumbnail, int? startSeconds}) =>
+  /// YouTube playlist (`list=`) for a playlist item; one queue item plays
+  /// through the whole playlist on YouTube.
+  final String? playlistId;
+
+  /// YouTube `index=` inside [playlistId], when the link had one.
+  final int? playlistIndex;
+
+  /// Probed video size of a local file (`null` when unknown / YouTube).
+  final int? width;
+  final int? height;
+
+  /// Short resolution label (`4K`, `1080p`, `720p`, … or `W×H`).
+  String? get resolution => resolutionLabel(width, height);
+
+  bool get isPlaylist => kind == MediaKind.youtube && playlistId != null;
+
+  /// The YouTube link this item plays (`null` for local files), with the
+  /// playlist kept.
+  YouTubeLink? get youtubeLink {
+    if (kind != MediaKind.youtube) return null;
+    final v = source.isEmpty ? null : source;
+    if (v == null && playlistId == null) return null;
+    if (v == null) return YouTubeLink.playlist(playlistId!, playlistIndex: playlistIndex);
+    return YouTubeLink(v, startSeconds: startSeconds, playlistId: playlistId, playlistIndex: playlistIndex);
+  }
+
+  MediaItem copyWith(
+          {String? id,
+          String? title,
+          double? durationSeconds,
+          String? thumbnail,
+          int? startSeconds,
+          int? width,
+          int? height}) =>
       MediaItem(
         id: id ?? this.id,
         kind: kind,
@@ -81,6 +145,10 @@ class MediaItem {
         thumbnail: thumbnail ?? this.thumbnail,
         startSeconds: startSeconds ?? this.startSeconds,
         durationSeconds: durationSeconds ?? this.durationSeconds,
+        playlistId: playlistId,
+        playlistIndex: playlistIndex,
+        width: width ?? this.width,
+        height: height ?? this.height,
       );
 
   Map<String, Object?> toJson() => {
@@ -91,6 +159,11 @@ class MediaItem {
         if (thumbnail != null) 'thumbnail': thumbnail,
         if (startSeconds != null) 'startSeconds': startSeconds,
         if (durationSeconds != null) 'durationSeconds': durationSeconds,
+        if (playlistId != null) 'playlistId': playlistId,
+        if (playlistIndex != null) 'playlistIndex': playlistIndex,
+        if (width != null) 'width': width,
+        if (height != null) 'height': height,
+        if (resolution != null) 'resolution': resolution,
       };
 
   factory MediaItem.fromJson(Map<String, Object?> j) => MediaItem(
@@ -101,6 +174,10 @@ class MediaItem {
         thumbnail: j['thumbnail'] as String?,
         startSeconds: _toInt(j['startSeconds']),
         durationSeconds: _toDouble(j['durationSeconds']),
+        playlistId: j['playlistId'] as String?,
+        playlistIndex: _toInt(j['playlistIndex']),
+        width: _toInt(j['width']),
+        height: _toInt(j['height']),
       );
 }
 
@@ -117,6 +194,11 @@ class NowPlaying {
     this.windowOpen = false,
     this.subtitles,
     this.canPrevious = false,
+    this.canNext = false,
+    this.width,
+    this.height,
+    this.playlistPosition,
+    this.playlistLength,
   });
 
   final MediaItem? item;
@@ -136,6 +218,22 @@ class NowPlaying {
   final bool? subtitles;
   final bool canPrevious;
 
+  /// Next is possible: our queue has items, or a YouTube playlist has a
+  /// next video.
+  final bool canNext;
+
+  /// Video size of a local file (from the probe, else from mpv).
+  final int? width;
+  final int? height;
+
+  /// 1-based position and length of the YouTube playlist being played
+  /// (`null` when not a playlist or unknown).
+  final int? playlistPosition;
+  final int? playlistLength;
+
+  /// Short resolution label for a local file (`4K`, `1080p`, …).
+  String? get resolution => item?.kind == MediaKind.local ? resolutionLabel(width, height) : null;
+
   MediaKind? get kind => item?.kind;
   bool get isPlaying => state == PlaybackState.playing;
 
@@ -153,6 +251,7 @@ class NowPlaying {
     bool? subtitles,
     bool clearSubtitles = false,
     bool? canPrevious,
+    bool? canNext,
   }) =>
       NowPlaying(
         item: clearItem ? null : (item ?? this.item),
@@ -165,6 +264,11 @@ class NowPlaying {
         windowOpen: windowOpen ?? this.windowOpen,
         subtitles: clearSubtitles ? null : (subtitles ?? this.subtitles),
         canPrevious: canPrevious ?? this.canPrevious,
+        canNext: canNext ?? this.canNext,
+        width: width,
+        height: height,
+        playlistPosition: playlistPosition,
+        playlistLength: playlistLength,
       );
 
   Map<String, Object?> toJson() => {
@@ -181,6 +285,12 @@ class NowPlaying {
         'windowOpen': windowOpen,
         'subtitles': subtitles,
         'canPrevious': canPrevious,
+        'canNext': canNext,
+        if (width != null) 'width': width,
+        if (height != null) 'height': height,
+        if (resolution != null) 'resolution': resolution,
+        if (playlistPosition != null) 'playlistPosition': playlistPosition,
+        if (playlistLength != null) 'playlistLength': playlistLength,
       };
 
   factory NowPlaying.fromJson(Map<String, Object?> j) => NowPlaying(
@@ -194,6 +304,11 @@ class NowPlaying {
         windowOpen: j['windowOpen'] == true,
         subtitles: j['subtitles'] as bool?,
         canPrevious: j['canPrevious'] == true,
+        canNext: j['canNext'] == true,
+        width: _toInt(j['width']),
+        height: _toInt(j['height']),
+        playlistPosition: _toInt(j['playlistPosition']),
+        playlistLength: _toInt(j['playlistLength']),
       );
 }
 
@@ -220,6 +335,8 @@ class LibraryEntry {
     required this.sizeBytes,
     this.durationSeconds,
     this.hasThumbnail = false,
+    this.width,
+    this.height,
   });
 
   /// Stable id derived from the absolute path.
@@ -235,6 +352,13 @@ class LibraryEntry {
   final double? durationSeconds;
   final bool hasThumbnail;
 
+  /// Probed video size (`null` until ffprobe has run).
+  final int? width;
+  final int? height;
+
+  /// Short resolution label (`4K`, `1080p`, `720p`, … or `W×H`).
+  String? get resolution => resolutionLabel(width, height);
+
   String get thumbnailPath => '/api/thumb/$id';
 
   Map<String, Object?> toJson() => {
@@ -245,6 +369,9 @@ class LibraryEntry {
         'size': sizeBytes,
         if (durationSeconds != null) 'duration': durationSeconds,
         'hasThumbnail': hasThumbnail,
+        if (width != null) 'width': width,
+        if (height != null) 'height': height,
+        if (resolution != null) 'resolution': resolution,
       };
 
   factory LibraryEntry.fromJson(Map<String, Object?> j) => LibraryEntry(
@@ -255,6 +382,8 @@ class LibraryEntry {
         sizeBytes: _toInt(j['size']) ?? 0,
         durationSeconds: _toDouble(j['duration']),
         hasThumbnail: j['hasThumbnail'] == true,
+        width: _toInt(j['width']),
+        height: _toInt(j['height']),
       );
 }
 

@@ -73,7 +73,8 @@ class PiTvServer {
       resolve: (item) {
         switch (item.kind) {
           case MediaKind.youtube:
-            return PlayTarget.youtube(YouTubeLink(item.source, startSeconds: item.startSeconds));
+            final link = item.youtubeLink;
+            return link == null ? null : PlayTarget.youtube(link);
           case MediaKind.local:
             final f = library.byId(item.source);
             return f == null ? null : PlayTarget.file(f.absolutePath, startSeconds: item.startSeconds);

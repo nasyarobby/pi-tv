@@ -4,9 +4,12 @@ import 'package:pi_tv_shared/pi_tv_shared.dart';
 
 import '../app_scope.dart';
 
-/// Paste a YouTube URL or share text, then Play now / Add to queue.
+/// Paste a YouTube video or playlist URL (or share text), then Play now /
+/// Add to queue. A playlist is one queue item. [wide] puts the field and
+/// both buttons on one row (desktop web layout).
 class AddUrlCard extends StatefulWidget {
-  const AddUrlCard({super.key});
+  const AddUrlCard({super.key, this.wide = false});
+  final bool wide;
   @override
   State<AddUrlCard> createState() => _AddUrlCardState();
 }
@@ -30,7 +33,7 @@ class _AddUrlCardState extends State<AddUrlCard> {
   Future<void> _send(PlayMode mode) async {
     final text = _ctrl.text;
     if (YouTubeLink.parse(text) == null) {
-      setState(() => _error = 'That is not a YouTube video link');
+      setState(() => _error = 'That is not a YouTube video or playlist link');
       return;
     }
     setState(() {
@@ -54,6 +57,47 @@ class _AddUrlCardState extends State<AddUrlCard> {
 
   @override
   Widget build(BuildContext context) {
+    final field = TextField(
+      key: const ValueKey('url-input'),
+      controller: _ctrl,
+      minLines: 1,
+      maxLines: widget.wide ? 1 : 3,
+      keyboardType: TextInputType.url,
+      onSubmitted: widget.wide && !_busy ? (_) => _send(PlayMode.now) : null,
+      decoration: InputDecoration(
+        labelText: 'YouTube link, playlist or share text',
+        border: const OutlineInputBorder(),
+        errorText: _error,
+        prefixIcon: widget.wide ? const Icon(Icons.link) : null,
+        suffixIcon: IconButton(tooltip: 'Paste', onPressed: _paste, icon: const Icon(Icons.content_paste)),
+      ),
+    );
+    final play = FilledButton.icon(
+      key: const ValueKey('url-play'),
+      onPressed: _busy ? null : () => _send(PlayMode.now),
+      icon: const Icon(Icons.play_arrow),
+      label: const Text('Play now'),
+    );
+    final queue = FilledButton.tonalIcon(
+      key: const ValueKey('url-queue'),
+      onPressed: _busy ? null : () => _send(PlayMode.queue),
+      icon: const Icon(Icons.playlist_add),
+      label: const Text('Add to queue'),
+    );
+    if (widget.wide) {
+      return Card(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Expanded(child: field),
+            const SizedBox(width: 12),
+            SizedBox(height: 56, width: 156, child: play),
+            const SizedBox(width: 10),
+            SizedBox(height: 56, width: 176, child: queue),
+          ]),
+        ),
+      );
+    }
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),

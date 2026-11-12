@@ -27,6 +27,9 @@ class FakePiServer {
     },
   ];
   List<Map<String, Object?>> pendingFiles = [];
+
+  /// List folders like the real server (otherwise every file at the top).
+  bool folders = false;
   NowPlaying status = const NowPlaying();
   final List<Map<String, Object?>> queue = [];
 
@@ -64,6 +67,31 @@ class FakePiServer {
         });
       case ('GET', '/api/library'):
         final q = r.url.queryParameters['q'];
+        final at = r.url.queryParameters['path'] ?? '';
+        if (folders && q == null) {
+          final prefix = at.isEmpty ? '' : '$at/';
+          final sub = <String, int>{};
+          final here = <Map<String, Object?>>[];
+          for (final f in files) {
+            final path = f['path'] as String;
+            if (!path.startsWith(prefix)) continue;
+            final rest = path.substring(prefix.length);
+            final slash = rest.indexOf('/');
+            if (slash < 0) {
+              here.add(f);
+            } else {
+              sub.update(rest.substring(0, slash), (v) => v + 1, ifAbsent: () => 1);
+            }
+          }
+          return _j({
+            'path': at,
+            'folders': [
+              for (final e in sub.entries) {'name': e.key, 'path': '$prefix${e.key}', 'count': e.value}
+            ],
+            'items': here,
+            'total': files.length,
+          });
+        }
         final items = q == null
             ? files
             : files.where((f) => (f['title'] as String).toLowerCase().contains(q.toLowerCase())).toList();
@@ -77,16 +105,33 @@ class FakePiServer {
         final req = PlayRequest.fromJson(body);
         final link = req.url == null ? null : YouTubeLink.parse(req.url!);
         if (req.url != null && link == null) return _j({'error': 'Not a YouTube video link'}, 400);
+        final file = link == null ? files.firstWhere((f) => f['id'] == req.localPath) : null;
         final item = MediaItem(
           id: 'i${requests.length}',
           kind: link != null ? MediaKind.youtube : MediaKind.local,
-          title: link != null ? 'YouTube ${link.videoId}' : 'Film One',
-          source: link?.videoId ?? req.localPath!,
+          title: link != null
+              ? (link.videoId != null ? 'YouTube ${link.videoId}' : 'YouTube playlist ${link.playlistId}')
+              : file!['title'] as String,
+          source: link != null ? (link.videoId ?? '') : req.localPath!,
+          playlistId: link?.playlistId,
+          playlistIndex: link?.playlistIndex,
+          width: file?['width'] as int?,
+          height: file?['height'] as int?,
         );
         if (req.mode == PlayMode.queue) {
           queue.add(item.toJson());
         } else {
-          status = NowPlaying(item: item, state: PlaybackState.playing, windowOpen: true, durationSeconds: 100);
+          status = NowPlaying(
+            item: item,
+            state: PlaybackState.playing,
+            windowOpen: true,
+            durationSeconds: 100,
+            width: item.width,
+            height: item.height,
+            playlistPosition: item.isPlaylist ? 1 : null,
+            playlistLength: item.isPlaylist ? 5 : null,
+            canNext: item.isPlaylist,
+          );
         }
         return _j({'item': item.toJson(), 'status': status.copyWith(queueLength: queue.length).toJson()});
       case ('POST', '/api/control'):

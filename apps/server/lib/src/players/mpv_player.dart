@@ -239,7 +239,9 @@ class MpvPlayer implements Player {
       'volume',
       'mute',
       'media-title',
-      'sub-visibility'
+      'sub-visibility',
+      'width',
+      'height',
     ]) {
       await ipc.command(['observe_property', i++, prop]);
     }
@@ -267,6 +269,10 @@ class MpvPlayer implements Player {
         if (data is String) _emit(_snap.copyWith(title: data));
       case 'sub-visibility':
         if (data is bool) _emit(_snap.copyWith(subtitles: data));
+      case 'width':
+        if (data is num) _emit(_snap.copyWith(width: data.toInt()));
+      case 'height':
+        if (data is num) _emit(_snap.copyWith(height: data.toInt()));
     }
   }
 
@@ -361,6 +367,36 @@ class MpvPlayer implements Player {
         sock.deleteSync();
       } catch (_) {}
     }
+    _emit(const PlayerSnapshot(open: false));
+  }
+
+  @override
+  Future<bool> skipInItem({required bool forward}) async => false;
+
+  /// Quits our mpv even when this instance is not attached to it: an mpv
+  /// left on [socketPath] by a previous server run (or after the IPC
+  /// connection dropped) is asked to `quit` over its socket.
+  @override
+  Future<void> closeIfRunning() async {
+    if (isOpen || _process != null || (_ipc != null && !_ipc!.isClosed)) return close();
+    if (FileSystemEntity.typeSync(socketPath) != FileSystemEntityType.unixDomainSock) return;
+    MpvIpc ipc;
+    try {
+      ipc = await _connector.connect(socketPath);
+    } catch (_) {
+      // Stale socket: nothing is listening.
+      try {
+        File(socketPath).deleteSync();
+      } catch (_) {}
+      return;
+    }
+    _log.info('quitting an mpv this server was not attached to ($socketPath)');
+    unawaited(ipc.command(['quit']).then((_) {}, onError: (Object _) {}));
+    await ipc.done.timeout(const Duration(seconds: 5), onTimeout: () {});
+    await ipc.close().catchError((Object _) {});
+    try {
+      File(socketPath).deleteSync();
+    } catch (_) {}
     _emit(const PlayerSnapshot(open: false));
   }
 

@@ -13,12 +13,25 @@ import 'player.dart';
 
 /// JavaScript injected into every YouTube page: records the end of the
 /// main video and keeps YouTube's "Autoplay next" off so a related video
-/// never starts by itself.
+/// never starts by itself. Inside a YouTube playlist that still has videos
+/// left it does neither, so YouTube autoplays the next playlist video
+/// (spec §5.7); related autoplay is blocked again on the last one.
 final String youtubeGuardScript = r'''
 /*pitv:guard*/(() => {
   if (window.__piTv) return;
   window.__piTv = { ended: false };
   const isAd = () => !!document.querySelector('#movie_player.ad-showing');
+  // True while a YouTube playlist (list=) has videos after the current one,
+  // or its length is not known yet: let YouTube advance on its own.
+  const inOpenPlaylist = () => {
+    try {
+      if (!new URL(location.href).searchParams.get('list')) return false;
+      const p = document.getElementById('movie_player');
+      const pl = p && p.getPlaylist ? p.getPlaylist() : null;
+      if (!pl || !pl.length) return true;
+      return p.getPlaylistIndex() < pl.length - 1;
+    } catch (e) { return false; }
+  };
   const cancelAutonav = () => {
     document.querySelectorAll('.ytp-autonav-endscreen-cancel-button, .ytp-upnext-cancel-button')
       .forEach((b) => { try { b.click(); } catch (e) {} });
@@ -45,10 +58,10 @@ final String youtubeGuardScript = r'''
     const v = document.querySelector('video');
     if (v && !v.__piTvHooked) {
       v.__piTvHooked = true;
-      v.addEventListener('ended', () => { if (!isAd()) { window.__piTv.ended = true; cancelAutonav(); } });
+      v.addEventListener('ended', () => { if (!isAd() && !inOpenPlaylist()) { window.__piTv.ended = true; cancelAutonav(); } });
       v.addEventListener('playing', () => { if (!isAd()) window.__piTv.ended = false; });
     }
-    cancelAutonav();
+    if (!inOpenPlaylist()) cancelAutonav();
   };
   setInterval(hook, 500);
   document.addEventListener('DOMContentLoaded', hook);
@@ -82,20 +95,23 @@ const String youtubeStateScript = r'''
 /*pitv:state*/(() => {
   const v = document.querySelector('video');
   const p = document.getElementById('movie_player');
-  let vid = null;
+  let vid = null, list = null;
   try {
     const u = new URL(location.href);
     vid = u.searchParams.get('v');
+    list = u.searchParams.get('list');
     if (!vid) { const m = u.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})/); if (m) vid = m[1]; }
   } catch (e) {}
   const ad = !!document.querySelector('#movie_player.ad-showing');
   let ps = -1;
   try { if (p && p.getPlayerState) ps = p.getPlayerState(); } catch (e) {}
   const ended = !ad && (ps === 0 || (!!v && v.ended) || !!(window.__piTv && window.__piTv.ended));
+  let plIdx = null, plLen = null;
+  try { if (list && p && p.getPlaylist) { const pl = p.getPlaylist(); if (pl && pl.length) { plLen = pl.length; plIdx = p.getPlaylistIndex(); } } } catch (e) {}
   let vol = v ? v.volume * 100 : 100, muted = v ? v.muted : false;
   try { if (p && p.getVolume) { vol = p.getVolume(); muted = p.isMuted(); } } catch (e) {}
   return JSON.stringify({
-    vid, url: location.href, title: document.title, hasVideo: !!v, ad,
+    vid, list, plIdx, plLen, path: location.pathname, url: location.href, title: document.title, hasVideo: !!v, ad,
     t: v ? v.currentTime : 0,
     d: v && isFinite(v.duration) ? v.duration : null,
     paused: v ? v.paused : true, ended, vol, muted,
@@ -136,6 +152,7 @@ class ChromiumPlayer implements Player {
     this.launchTimeout = const Duration(seconds: 40),
     this.loadTimeout = const Duration(seconds: 25),
     this.settleDelay = const Duration(milliseconds: 1500),
+    this.playlistAdvanceGrace = const Duration(seconds: 10),
     Future<OutputSize?> Function(DisplayEnvironment env)? outputSize,
   })  : _runner = runner,
         _outputSize = outputSize ?? ((env) => detectOutputSize(runner, env)),
@@ -152,6 +169,10 @@ class ChromiumPlayer implements Player {
   final Duration launchTimeout;
   final Duration loadTimeout;
   final Duration settleDelay;
+
+  /// How long a playlist video may sit ended without YouTube moving on to
+  /// the next playlist video before the item counts as ended anyway.
+  final Duration playlistAdvanceGrace;
   final Future<OutputSize?> Function(DisplayEnvironment env) _outputSize;
   final _log = Log('chromium');
 
@@ -160,6 +181,11 @@ class ChromiumPlayer implements Player {
   Timer? _poll;
   bool _polling = false;
   String? _expectedId;
+
+  /// `list=` of the YouTube playlist being played (one queue item).
+  String? _expectedList;
+  bool _playlistFinished = false;
+  DateTime? _endedSince;
   bool _forcedEnded = false;
   bool _navigating = false;
   OutputSize? _output;
@@ -386,19 +412,31 @@ class ChromiumPlayer implements Player {
   Future<void> load(PlayTarget target) async {
     final link = target.link;
     if (link == null) throw ArgumentError('ChromiumPlayer only plays YouTube links');
+    // list= and index are kept: a playlist is never opened as a bare video.
     final url = link.watchUrl.toString();
     _navigating = true;
     _forcedEnded = false;
     _expectedId = link.videoId;
+    _expectedList = link.playlistId;
+    _playlistFinished = false;
+    _endedSince = null;
     try {
       await _ensureBrowser(url);
       final page = _page!;
       final st = await _state();
-      if (st?['vid'] != link.videoId || link.startSeconds != null) {
+      final alreadyThere = link.videoId != null &&
+          st?['vid'] == link.videoId &&
+          st?['list'] == link.playlistId &&
+          link.startSeconds == null &&
+          link.playlistIndex == null;
+      if (!alreadyThere) {
+        _log.info('opening $url');
         await page.send('Page.navigate', {'url': url});
       }
       await page.send('Page.bringToFront');
-      await _waitForVideo(link.videoId);
+      if (link.videoId == null) await _startPlaylistPage(link.playlistId!);
+      final ready = await _waitForVideo();
+      if (_expectedId == null && ready?['vid'] is String) _expectedId = ready!['vid'] as String;
       await _eval(youtubeGuardScript);
       await _startPlayback();
       await _logGeometry();
@@ -409,16 +447,54 @@ class ChromiumPlayer implements Player {
     await _tick();
   }
 
-  Future<void> _waitForVideo(String id) async {
+  /// Waits until the expected video (or, for a bare playlist link, any
+  /// video of the expected playlist) has a player. Returns the last state.
+  Future<Map<String, Object?>?> _waitForVideo() async {
     final deadline = DateTime.now().add(loadTimeout);
     while (true) {
       final s = await _state();
-      if (s != null && s['vid'] == id && s['hasVideo'] == true) return;
+      final id = _expectedId;
+      final ok = s != null &&
+          s['hasVideo'] == true &&
+          (id != null ? s['vid'] == id : s['vid'] != null && s['list'] == _expectedList);
+      if (ok) return s;
       if (DateTime.now().isAfter(deadline)) {
-        _log.warn('timed out waiting for the YouTube player of $id');
-        return;
+        _log.warn('timed out waiting for the YouTube player of ${id ?? 'playlist $_expectedList'}');
+        return s;
       }
       await Future<void>.delayed(const Duration(milliseconds: 300));
+    }
+  }
+
+  /// A bare `playlist?list=` link opens YouTube's playlist page, which has
+  /// no player. Start it like "Play all": open the first `watch?v=…&list=`
+  /// link of that playlist on the page (the list stays in the URL).
+  Future<void> _startPlaylistPage(String list) async {
+    final page = _page;
+    if (page == null) return;
+    final deadline = DateTime.now().add(loadTimeout);
+    final listJs = jsonEncode(list);
+    while (true) {
+      final s = await _state();
+      if (s != null && s['vid'] != null && s['list'] == list) return; // already on a video of the playlist
+      final href = await _eval(_cmd('playall', '''
+        const want = $listJs;
+        for (const a of document.querySelectorAll('a[href*="/watch?"]')) {
+          try { const u = new URL(a.href, location.href); if (u.searchParams.get('list') === want && u.searchParams.get('v')) return u.href; } catch (e) {}
+        }
+        return null;'''));
+      if (href is String && href.isNotEmpty) {
+        _log.info('playlist page: starting $href');
+        await page.send('Page.navigate', {'url': href});
+        return;
+      }
+      if (DateTime.now().isAfter(deadline)) {
+        final fallback = Uri.https('www.youtube.com', '/watch', {'list': list}).toString();
+        _log.warn('playlist page has no video link; trying $fallback');
+        await page.send('Page.navigate', {'url': fallback});
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 400));
     }
   }
 
@@ -499,16 +575,45 @@ class ChromiumPlayer implements Player {
       final s = await _state();
       if (s == null) return;
       final vid = s['vid'] as String?;
+      final list = s['list'] as String?;
       final expected = _expectedId;
       if (!_navigating && expected != null && vid != null && vid != expected) {
-        // YouTube navigated to a related video on its own: go back and stay
-        // on the ended video.
-        _log.warn('YouTube moved to $vid by itself; returning to $expected (ended)');
-        await _returnToEnded(expected);
-        return;
+        if (_expectedList != null && list == _expectedList && !_playlistFinished) {
+          // YouTube moved on inside our playlist: that is the playlist
+          // playing through, not related-video autoplay.
+          _log.info('playlist $list advanced to $vid');
+          _expectedId = vid;
+          _endedSince = null;
+        } else {
+          // YouTube navigated to a related video on its own: go back and
+          // stay on the ended video.
+          _log.warn('YouTube moved to $vid by itself; returning to $expected (ended)');
+          await _returnToEnded(expected);
+          return;
+        }
       }
       if (s['error'] == true && !_snap.ended) _log.warn('YouTube player shows an error for $vid; treating it as ended');
-      final ended = _forcedEnded || s['ended'] == true || s['error'] == true;
+      final plIdx = (s['plIdx'] as num?)?.toInt();
+      final plLen = (s['plLen'] as num?)?.toInt();
+      final rawEnded = s['ended'] == true || s['error'] == true;
+      var ended = rawEnded;
+      if (_expectedList != null) {
+        if (!rawEnded) {
+          _endedSince = null;
+        } else if (plIdx == null || plLen == null || plIdx < plLen - 1) {
+          // A playlist video ended with more to come: YouTube autoplays the
+          // next one. Only if it does not within the grace period does the
+          // item count as ended.
+          final since = _endedSince ??= DateTime.now();
+          ended = DateTime.now().difference(since) >= playlistAdvanceGrace;
+          if (ended && !_playlistFinished) _log.warn('playlist $list did not advance; treating it as finished');
+        }
+        if (ended && !_playlistFinished) {
+          _playlistFinished = true;
+          if (plIdx != null && plLen != null && plIdx >= plLen - 1) _log.info('playlist $list finished');
+        }
+      }
+      ended = _forcedEnded || ended;
       var title = s['title'] as String?;
       if (title != null) {
         title = title.replaceFirst(RegExp(r'^\(\d+\)\s*'), '').replaceFirst(RegExp(r'\s*-\s*YouTube$'), '');
@@ -523,6 +628,8 @@ class ChromiumPlayer implements Player {
         volume: (s['vol'] as num?)?.toDouble() ?? 100,
         muted: s['muted'] == true,
         title: title,
+        playlistIndex: _expectedList != null && list == _expectedList ? plIdx : null,
+        playlistLength: _expectedList != null && list == _expectedList ? plLen : null,
       ));
     } catch (e) {
       _log.debug('poll failed: $e');
@@ -536,9 +643,10 @@ class ChromiumPlayer implements Player {
     if (page == null) return;
     _navigating = true;
     _forcedEnded = true;
+    if (_expectedList != null) _playlistFinished = true;
     try {
-      await page.send('Page.navigate', {'url': YouTubeLink(id).watchUrl.toString()});
-      await _waitForVideo(id);
+      await page.send('Page.navigate', {'url': YouTubeLink(id, playlistId: _expectedList).watchUrl.toString()});
+      await _waitForVideo();
       await _eval(_cmd('toend', '''
         const p = document.getElementById('movie_player'); const v = document.querySelector('video');
         try { if (p && p.pauseVideo) p.pauseVideo(); if (v) { v.pause(); if (isFinite(v.duration)) v.currentTime = Math.max(0, v.duration - 0.5); } } catch (e) {}
@@ -603,11 +711,49 @@ class ChromiumPlayer implements Player {
     return null;
   }
 
+  /// Next/previous video inside the YouTube playlist being played. `false`
+  /// for a single video, a finished playlist, or the last/first video, so
+  /// the controller moves in our queue instead.
+  @override
+  Future<bool> skipInItem({required bool forward}) async {
+    final page = _page;
+    if (_expectedList == null || _playlistFinished || page == null || page.isClosed) return false;
+    final s = await _state();
+    if (s == null || s['list'] != _expectedList) return false;
+    final idx = (s['plIdx'] as num?)?.toInt();
+    final len = (s['plLen'] as num?)?.toInt();
+    if (idx == null || len == null) return false;
+    if (forward ? idx >= len - 1 : idx <= 0) return false;
+    _log.info('${forward ? 'next' : 'previous'} inside playlist $_expectedList (${idx + 1}/$len)');
+    _forcedEnded = false;
+    _endedSince = null;
+    await _eval(_cmd(forward ? 'plnext' : 'plprev', '''
+      const p = document.getElementById('movie_player');
+      if (window.__piTv) window.__piTv.ended = false;
+      try { if (p) p.${forward ? 'nextVideo' : 'previousVideo'}(); } catch (e) {} return true;'''), userGesture: true);
+    await _tick();
+    return true;
+  }
+
+  /// Closes our Chromium even when this instance is not attached to it,
+  /// e.g. a window left on the CDP port by a previous server run. The CDP
+  /// port is dedicated to this app, so anything answering there is ours.
+  @override
+  Future<void> closeIfRunning() async {
+    if (isOpen || _process != null || _page != null || await _cdpUp()) {
+      if (!isOpen) _log.info('closing a Chromium this server was not attached to');
+      await close();
+    }
+  }
+
   @override
   Future<void> close() async {
     _poll?.cancel();
     _poll = null;
     _expectedId = null;
+    _expectedList = null;
+    _playlistFinished = false;
+    _endedSince = null;
     final page = _page;
     if (page != null && !page.isClosed) {
       try {

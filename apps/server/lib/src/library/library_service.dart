@@ -109,6 +109,8 @@ class LibraryService {
       sizeBytes: f.size,
       durationSeconds: m?.duration,
       hasThumbnail: m?.hasThumbnail ?? false,
+      width: m?.width,
+      height: m?.height,
     );
   }
 

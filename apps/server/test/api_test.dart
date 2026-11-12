@@ -45,7 +45,7 @@ class Harness {
     final playback = PlaybackController(
       players: {MediaKind.youtube: yt, MediaKind.local: local},
       resolve: (i) => i.kind == MediaKind.youtube
-          ? PlayTarget.youtube(YouTubeLink(i.source))
+          ? PlayTarget.youtube(i.youtubeLink!)
           : PlayTarget.file(library.byId(i.source)!.absolutePath),
     );
     final api = PiTvApi(
@@ -204,6 +204,34 @@ void main() {
       final s2 = await client.play(PlayRequest(localPath: film.id, mode: PlayMode.queue));
       expect(s2.queueLength, 1);
       expect((await client.queue()).single.title, 'Film One');
+    });
+
+    test('a playlist URL is one queue item and reaches the player with list= kept', () async {
+      const list = 'PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf';
+      final s =
+          await client.play(const PlayRequest(url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=$list&index=4'));
+      expect(s.item!.playlistId, list);
+      expect(s.item!.playlistIndex, 4);
+      expect(h.yt.loads.single.link!.watchUrl.toString(),
+          'https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=$list&index=4');
+
+      await client.play(const PlayRequest(url: 'https://youtube.com/playlist?list=$list', mode: PlayMode.queue));
+      final q = await client.queue();
+      expect(q, hasLength(1), reason: 'the playlist is not expanded into per-video entries');
+      expect(q.single.playlistId, list);
+      expect(q.single.source, '');
+      expect(q.single.youtubeLink!.watchUrl.toString(), 'https://www.youtube.com/playlist?list=$list');
+    });
+
+    test('local now playing payload has width, height and the resolution label', () async {
+      final film = (await client.library(query: 'film')).items.single;
+      final s = await client.play(PlayRequest(localPath: film.id));
+      expect(s.kind, MediaKind.local);
+      // No ffprobe in this harness: the size comes from the player.
+      h.local.emit(h.local.snapshot.copyWith(width: 1920, height: 1080));
+      final r = await http.get(h.u('/api/status'), headers: client.authHeaders);
+      final j = jsonDecode(r.body) as Map;
+      expect([j['width'], j['height'], j['resolution']], [1920, 1080, '1080p']);
     });
 
     test('non-YouTube URLs are rejected with 400', () async {

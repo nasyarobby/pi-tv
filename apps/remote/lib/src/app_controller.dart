@@ -300,7 +300,7 @@ class AppController extends ChangeNotifier {
 
   /// One-tap replay of a history entry.
   Future<void> replay(MediaItem item, [PlayMode mode = PlayMode.now]) => item.kind == MediaKind.youtube
-      ? playUrl(YouTubeLink(item.source, startSeconds: item.startSeconds).watchUrl.toString(), mode)
+      ? playUrl((item.youtubeLink ?? YouTubeLink(item.source)).watchUrl.toString(), mode)
       : playLocal(item.source, mode);
 
   Future<void> control(ControlAction action, [Object? value]) async {

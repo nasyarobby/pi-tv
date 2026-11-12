@@ -268,6 +268,127 @@ void main() {
     expect(last.durationSeconds, 10);
     await sub.cancel();
   });
+  group('switching players closes the one being left (spec §3, §12)', () {
+    test('local file closes Chromium even after Stop with the window left open', () async {
+      await pc.playNow(ytItem());
+      await pc.stop();
+      expect(yt.isOpen, isTrue, reason: 'Stop keeps the YouTube window');
+      await pc.playNow(localItem('film'));
+      expect(yt.isOpen, isFalse);
+      expect(yt.closes, 1);
+      expect(local.isOpen, isTrue);
+      expect([yt.isOpen, local.isOpen].where((o) => o), hasLength(1), reason: 'never both open');
+    });
+
+    test('YouTube quits mpv even after the local file ended (window left open)', () async {
+      await pc.playNow(localItem('film'));
+      local.finish();
+      await pump(20);
+      expect(pc.state, PlaybackState.ended);
+      expect(local.isOpen, isTrue);
+      await pc.playNow(ytItem());
+      expect(local.isOpen, isFalse);
+      expect(local.closes, 1);
+      expect(yt.isOpen, isTrue);
+    });
+
+    test('queue auto-advance across kinds closes the other player', () async {
+      await pc.playNow(localItem('a'));
+      await pc.enqueue(ytItem());
+      local.finish();
+      await pump(20);
+      expect(local.isOpen, isFalse);
+      expect(yt.isOpen, isTrue);
+    });
+
+    test('a window the server is not attached to (previous run) is closed too', () async {
+      yt.detachedWindow = true; // Chromium left open on the CDP port, isOpen false
+      await pc.playNow(localItem('film'));
+      expect(yt.closes, 1, reason: 'playing a local file must close Chromium');
+      expect(yt.detachedWindow, isFalse);
+
+      local.detachedWindow = true;
+      local.emit(const PlayerSnapshot(open: false)); // e.g. IPC dropped, mpv still up
+      await pc.playNow(ytItem());
+      expect(local.detachedWindow, isFalse, reason: 'playing YouTube must quit mpv');
+    });
+
+    test('Close also closes a detached window', () async {
+      await pc.playNow(ytItem());
+      local.detachedWindow = true;
+      await pc.close();
+      expect(yt.isOpen, isFalse);
+      expect(local.detachedWindow, isFalse);
+    });
+  });
+
+  group('YouTube playlist = one queue item (spec §5, §7)', () {
+    MediaItem playlistItem() =>
+        MediaItem(id: 'p${n++}', kind: MediaKind.youtube, title: 'Mix', source: 'aaaaaaaaaaa', playlistId: 'PLmix');
+
+    test('next/previous skip inside the playlist; the queue waits until it finishes', () async {
+      await pc.playNow(playlistItem());
+      await pc.enqueue(localItem('after'));
+      yt.playlistAt(0, 3);
+      expect(pc.status.playlistPosition, 1);
+      expect(pc.status.playlistLength, 3);
+      expect(pc.status.canNext, isTrue);
+
+      expect(await pc.next(), isTrue);
+      expect(yt.calls.last, 'playlist-next');
+      expect(pc.current!.playlistId, 'PLmix', reason: 'still the same queue item');
+      expect(pc.queue, hasLength(1));
+      expect(pc.status.playlistPosition, 2);
+
+      await pc.previous();
+      expect(yt.calls.last, 'playlist-prev');
+      expect(pc.status.playlistPosition, 1);
+
+      // YouTube advancing through the playlist is not an end.
+      yt.playlistAt(2, 3);
+      await pump(10);
+      expect(pc.current!.playlistId, 'PLmix');
+      expect(local.loads, isEmpty);
+
+      // On the last video Next moves in our queue.
+      expect(await pc.next(), isTrue);
+      expect(pc.current!.kind, MediaKind.local);
+      expect(yt.isOpen, isFalse);
+    });
+
+    test('only a finished playlist advances our queue; a single item is one history entry', () async {
+      await pc.playNow(playlistItem());
+      await pc.enqueue(ytItem('bbbbbbbbbbb'));
+      yt.playlistAt(1, 2);
+      await pump(5);
+      expect(pc.current!.playlistId, 'PLmix');
+      yt.finish(); // the player reports ended only when the playlist finished
+      await pump(20);
+      expect(pc.current!.source, 'bbbbbbbbbbb');
+      expect(pc.history.where((h) => h.item.playlistId == 'PLmix'), hasLength(1));
+    });
+
+    test('a single video: next goes to the queue, no in-item skip', () async {
+      await pc.playNow(ytItem());
+      expect(await pc.next(), isFalse);
+      expect(yt.calls, isNot(contains('playlist-next')));
+      expect(pc.status.canNext, isFalse);
+    });
+  });
+
+  test('now playing carries width, height and the resolution label for local files', () async {
+    await pc.playNow(MediaItem(id: 'x', kind: MediaKind.local, title: 'uhd', source: 'uhd', width: 3840, height: 2160));
+    final j = pc.status.toJson();
+    expect([j['width'], j['height'], j['resolution']], [3840, 2160, '4K']);
+
+    // Not probed yet: fall back to the size mpv reports.
+    await pc.playNow(localItem('raw'));
+    local.emit(local.snapshot.copyWith(width: 1280, height: 720));
+    expect(pc.status.resolution, '720p');
+
+    await pc.playNow(ytItem());
+    expect(pc.status.toJson().containsKey('resolution'), isFalse);
+  });
 }
 
 Future<String> _tempDir() async => (await Directory.systemTemp.createTemp('pitv')).path;

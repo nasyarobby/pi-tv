@@ -90,6 +90,9 @@ class PlaybackController {
 
   NowPlaying get status {
     final s = _active?.snapshot;
+    final cur = _current;
+    final local = cur?.kind == MediaKind.local;
+    final inPlaylist = cur?.isPlaylist == true && s != null && s.playlistIndex != null;
     return NowPlaying(
       item: _current,
       state: _state,
@@ -100,7 +103,13 @@ class PlaybackController {
       queueLength: _queue.length,
       windowOpen: windowOpen,
       subtitles: _current?.kind == MediaKind.local ? s?.subtitles : null,
-      canPrevious: _previous.isNotEmpty,
+      canPrevious: _previous.isNotEmpty || (inPlaylist && s.playlistIndex! > 0),
+      canNext: _queue.isNotEmpty || (cur?.isPlaylist == true && (s?.hasPlaylistNext ?? false)),
+      // Local files: probed size from the library, else what mpv decodes.
+      width: local ? (cur!.width ?? s?.width) : null,
+      height: local ? (cur!.height ?? s?.height) : null,
+      playlistPosition: inPlaylist ? s.playlistIndex! + 1 : null,
+      playlistLength: inPlaylist ? s.playlistLength : null,
     );
   }
 
@@ -236,11 +245,18 @@ class PlaybackController {
     if (target == null) throw PlaybackException('Cannot play "${item.title}": file is no longer in the library');
     final player = _players[item.kind];
     if (player == null) throw PlaybackException('No player for ${item.kind.name}');
-    // Switching YouTube <-> local closes the player being left.
+    // Switching YouTube <-> local closes the player being left (spec §3):
+    // playing a local file closes Chromium, playing YouTube quits mpv. This
+    // also catches a window we are not attached to (left over from a
+    // previous server run, or after its connection dropped), so both are
+    // never open at once.
     for (final other in _players.values) {
-      if (!identical(other, player) && other.isOpen) {
-        _log.info('switching to ${item.kind.name}: closing ${other.kind.name} player');
-        await other.close();
+      if (identical(other, player)) continue;
+      if (other.isOpen) _log.info('switching to ${item.kind.name}: closing ${other.kind.name} player');
+      try {
+        await other.closeIfRunning();
+      } catch (e) {
+        _log.warn('could not close the ${other.kind.name} player: $e');
       }
     }
     final prev = _current;
@@ -274,7 +290,17 @@ class PlaybackController {
         }
       });
 
+  /// Next: inside a YouTube playlist, the next video of that playlist;
+  /// otherwise (single video, last playlist video, local file) the next
+  /// item of our queue.
   Future<bool> next() => _serial(() async {
+        final a = _active;
+        if (a != null && a.isOpen && _current?.isPlaylist == true && await a.skipInItem(forward: true)) {
+          if (_state == PlaybackState.ended || _state == PlaybackState.stopped || _state == PlaybackState.paused) {
+            await _setState(PlaybackState.playing);
+          }
+          return true;
+        }
         if (_queue.isEmpty) return false;
         final n = _queue.removeAt(0);
         _queueChanged();
@@ -286,6 +312,11 @@ class PlaybackController {
   /// back to the item played before it (the current one returns to the
   /// front of the queue).
   Future<void> previous() => _serial(() async {
+        final a = _active;
+        if (a != null && a.isOpen && _current?.isPlaylist == true && await a.skipInItem(forward: false)) {
+          if (_state != PlaybackState.playing) await _setState(PlaybackState.playing);
+          return;
+        }
         final pos = _active?.snapshot.position ?? 0;
         if (_previous.isEmpty || pos > 5) {
           if (_active != null && _current != null) {
@@ -339,9 +370,11 @@ class PlaybackController {
   /// Close: the only user action that tears the TV window down.
   Future<void> close() => _serial(() async {
         for (final p in _players.values) {
-          if (p.isOpen) {
-            _log.info('closing ${p.kind.name} player (Close from remote)');
-            await p.close();
+          if (p.isOpen) _log.info('closing ${p.kind.name} player (Close from remote)');
+          try {
+            await p.closeIfRunning();
+          } catch (e) {
+            _log.warn('could not close the ${p.kind.name} player: $e');
           }
         }
         _active = null;

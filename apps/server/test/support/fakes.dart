@@ -81,6 +81,15 @@ class FakePlayer implements Player {
   int closes = 0;
   Object? failNextLoad;
 
+  /// A window of this player that is up but not attached (e.g. left open
+  /// by a previous server run): [isOpen] is false, [closeIfRunning] must
+  /// still close it.
+  bool detachedWindow = false;
+
+  /// Simulated YouTube playlist position (0-based) and length.
+  int? playlistIndex;
+  int? playlistLength;
+
   @override
   bool get isOpen => _snap.open;
   @override
@@ -159,10 +168,36 @@ class FakePlayer implements Player {
   Future<void> toggleFullscreen() async => calls.add('fullscreen');
 
   @override
+  Future<bool> skipInItem({required bool forward}) async {
+    final i = playlistIndex, n = playlistLength;
+    if (i == null || n == null) return false;
+    if (forward ? i >= n - 1 : i <= 0) return false;
+    calls.add(forward ? 'playlist-next' : 'playlist-prev');
+    playlistIndex = forward ? i + 1 : i - 1;
+    emit(PlayerSnapshot(
+        open: true, paused: false, duration: 10, playlistIndex: playlistIndex, playlistLength: playlistLength));
+    return true;
+  }
+
+  /// Emits a playlist position (YouTube moved on inside the playlist).
+  void playlistAt(int index, int length) {
+    playlistIndex = index;
+    playlistLength = length;
+    emit(PlayerSnapshot(open: true, paused: false, duration: 10, playlistIndex: index, playlistLength: length));
+  }
+
+  @override
   Future<void> close() async {
     calls.add('close');
     closes++;
+    detachedWindow = false;
+    playlistIndex = playlistLength = null;
     emit(const PlayerSnapshot(open: false));
+  }
+
+  @override
+  Future<void> closeIfRunning() async {
+    if (isOpen || detachedWindow) await close();
   }
 
   @override
@@ -217,9 +252,31 @@ class FakeYouTubePage {
     return u?.queryParameters['v'];
   }
 
+  String? get list => Uri.tryParse(url)?.queryParameters['list'];
+
+  /// Simulated YouTube playlist: its id and video ids.
+  String? playlistId;
+  List<String> playlist = const [];
+
+  int? get plIdx => list != null && list == playlistId && playlist.contains(vid) ? playlist.indexOf(vid!) : null;
+  int? get plLen => plIdx == null ? null : playlist.length;
+
+  /// What YouTube does when a playlist video ends: go to the next one.
+  void advancePlaylist() {
+    final i = plIdx!;
+    url = 'https://www.youtube.com/watch?v=${playlist[i + 1]}&list=$playlistId&index=${i + 2}';
+    t = 0;
+    ended = false;
+    paused = false;
+  }
+
   Map<String, Object?> state() {
     return {
       'vid': vid,
+      'list': list,
+      'plIdx': plIdx,
+      'plLen': plLen,
+      'path': Uri.tryParse(url)?.path,
       'url': url,
       'title': title,
       'hasVideo': hasVideo,
@@ -260,7 +317,7 @@ class FakeCdpSession implements CdpSession {
     switch (method) {
       case 'Page.navigate':
         page.url = params['url'] as String;
-        page.hasVideo = true;
+        page.hasVideo = page.vid != null; // a playlist page has no player
         page.ended = false;
         page.t = 0;
         page.paused = true;
@@ -334,6 +391,20 @@ class FakeCdpSession implements CdpSession {
         return true;
       case 'rect':
         return jsonEncode({'x': 100, 'y': 100});
+      case 'playall':
+        if (page.list == page.playlistId && page.playlist.isNotEmpty) {
+          return 'https://www.youtube.com/watch?v=${page.playlist.first}&list=${page.playlistId}&index=1';
+        }
+        return null;
+      case 'plnext':
+      case 'plprev':
+        final i = page.plIdx!;
+        final j = _marker(expr) == 'plnext' ? i + 1 : i - 1;
+        page.url = 'https://www.youtube.com/watch?v=${page.playlist[j]}&list=${page.playlistId}&index=${j + 1}';
+        page.t = 0;
+        page.ended = false;
+        page.paused = false;
+        return true;
     }
     return true;
   }

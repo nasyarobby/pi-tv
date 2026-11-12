@@ -1,27 +1,79 @@
 /// Parses YouTube links (and messy share text containing one) into a video
-/// id plus an optional start time.
+/// id and/or playlist id, plus an optional start time and playlist index.
 library;
 
-/// A single YouTube video reference.
+/// A YouTube video, a playlist, or a video inside a playlist.
+///
+/// A playlist is one item in the Pi TV queue: the TV opens [watchUrl] with
+/// `list=` (and `index`) kept, and YouTube plays through the playlist.
 class YouTubeLink {
-  const YouTubeLink(this.videoId, {this.startSeconds});
+  const YouTubeLink(this.videoId, {this.startSeconds, this.playlistId, this.playlistIndex})
+      : assert(videoId != null || playlistId != null);
 
-  /// The 11 character YouTube video id.
-  final String videoId;
+  /// A playlist without a specific video (`youtube.com/playlist?list=`).
+  const YouTubeLink.playlist(String this.playlistId, {this.playlistIndex})
+      : videoId = null,
+        startSeconds = null;
+
+  /// The 11 character YouTube video id (`null` for a bare playlist link).
+  final String? videoId;
 
   /// Start offset in seconds, if the link carried a timestamp.
   final int? startSeconds;
 
-  /// Canonical watch URL that the TV navigates to.
-  Uri get watchUrl => Uri.https('www.youtube.com', '/watch', {
-        'v': videoId,
-        if (startSeconds != null && startSeconds! > 0) 't': '${startSeconds}s',
-      });
+  /// The `list=` playlist id, if any.
+  final String? playlistId;
 
-  /// Default thumbnail served by YouTube's image CDN.
-  String get thumbnailUrl => 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg';
+  /// The `index=` position inside the playlist (YouTube's 1-based value).
+  final int? playlistIndex;
+
+  bool get isPlaylist => playlistId != null;
+
+  /// The URL the TV opens. `list` and `index` are kept; a playlist is never
+  /// rewritten as a bare single-video `watch?v=` link (spec §5.4):
+  /// * video + playlist: `watch?v=<id>&list=<list>[&index=<n>][&t=<s>s]`
+  /// * playlist only: `playlist?list=<list>`
+  /// * video only: `watch?v=<id>[&t=<s>s]`
+  Uri get watchUrl {
+    final v = videoId;
+    if (v == null) {
+      return Uri.https('www.youtube.com', '/playlist', {
+        'list': playlistId!,
+        if (playlistIndex != null) 'index': '$playlistIndex',
+      });
+    }
+    return Uri.https('www.youtube.com', '/watch', {
+      'v': v,
+      if (playlistId != null) 'list': playlistId!,
+      if (playlistId != null && playlistIndex != null) 'index': '$playlistIndex',
+      if (startSeconds != null && startSeconds! > 0) 't': '${startSeconds}s',
+    });
+  }
+
+  /// Playlist page URL (`playlist?list=`), or `null` for a single video.
+  Uri? get playlistUrl => playlistId == null ? null : Uri.https('www.youtube.com', '/playlist', {'list': playlistId!});
+
+  /// Default thumbnail served by YouTube's image CDN (`null` for a bare
+  /// playlist link, which has no video id).
+  String? get thumbnailUrl => videoId == null ? null : 'https://i.ytimg.com/vi/$videoId/hqdefault.jpg';
+
+  /// Short human label: `youtu.be/<id>`, `Playlist <list>` or both.
+  String get shortLabel {
+    final parts = <String>[
+      if (videoId != null) 'youtu.be/$videoId',
+      if (playlistId != null) 'playlist $playlistId${playlistIndex != null ? ' #$playlistIndex' : ''}',
+      if (startSeconds != null) 'from ${startSeconds}s',
+    ];
+    return parts.join(' · ');
+  }
+
+  /// Same link with a different start time.
+  YouTubeLink withStart(int? seconds) => videoId == null
+      ? this
+      : YouTubeLink(videoId, startSeconds: seconds, playlistId: playlistId, playlistIndex: playlistIndex);
 
   static final RegExp _idPattern = RegExp(r'^[A-Za-z0-9_-]{11}$');
+  static final RegExp _listPattern = RegExp(r'^[A-Za-z0-9_-]{2,80}$');
 
   /// Hosts that are accepted as YouTube (exact match after lower-casing).
   static const Set<String> hosts = {
@@ -38,14 +90,18 @@ class YouTubeLink {
   /// True when [id] has the shape of a YouTube video id.
   static bool isValidVideoId(String id) => _idPattern.hasMatch(id);
 
+  /// True when [id] has the shape of a YouTube playlist id (`PL…`, `RD…`,
+  /// `OLAK5uy_…`, `UU…`, …).
+  static bool isValidPlaylistId(String id) => _listPattern.hasMatch(id);
+
   /// True when [host] is one of the accepted YouTube hosts.
   static bool isYouTubeHost(String host) => hosts.contains(host.toLowerCase());
 
-  /// Extracts the first YouTube video link from [text].
+  /// Extracts the first YouTube video or playlist link from [text].
   ///
   /// [text] may be a bare URL, a URL without a scheme, or share text such as
   /// `"Great song - YouTube https://youtu.be/abc?t=42"`. Returns `null` when
-  /// no supported YouTube video URL is found. Non-YouTube URLs are rejected.
+  /// no supported YouTube URL is found. Non-YouTube URLs are rejected.
   static YouTubeLink? parse(String text) {
     for (final candidate in _candidates(text)) {
       final link = parseUrl(candidate);
@@ -58,7 +114,7 @@ class YouTubeLink {
   static YouTubeLink parseOrThrow(String text) {
     final link = parse(text);
     if (link == null) {
-      throw const FormatException('Not a supported YouTube video link');
+      throw const FormatException('Not a supported YouTube video or playlist link');
     }
     return link;
   }
@@ -89,10 +145,23 @@ class YouTubeLink {
     } else if (segments.isEmpty || segments.first == 'watch_videos') {
       id = uri.queryParameters['v'];
     }
-    if (id == null || !isValidVideoId(id)) return null;
+    // `embed/videoseries?list=` is a playlist embed; "videoseries" happens
+    // to have the shape of a video id.
+    if (id == 'videoseries' || (id != null && !isValidVideoId(id))) id = null;
 
-    final start = _startFrom(uri);
-    return YouTubeLink(id, startSeconds: start);
+    // Playlist: `list=` on watch/share/embed URLs, or `/playlist?list=`.
+    // (`embed/videoseries?list=` has no video id.)
+    String? list = uri.queryParameters['list'];
+    final playlistPage = segments.isNotEmpty && segments.first == 'playlist';
+    final videoseries = segments.length >= 2 && segments.first == 'embed' && segments[1] == 'videoseries';
+    if (list != null && !isValidPlaylistId(list)) list = null;
+    if (id == null && !(playlistPage || videoseries || segments.isEmpty || segments.first == 'watch')) list = null;
+    if (id == null && list == null) return null;
+
+    final index = int.tryParse(uri.queryParameters['index'] ?? '');
+    final playlistIndex = list != null && index != null && index > 0 ? index : null;
+    if (id == null) return YouTubeLink.playlist(list!, playlistIndex: playlistIndex);
+    return YouTubeLink(id, startSeconds: _startFrom(uri), playlistId: list, playlistIndex: playlistIndex);
   }
 
   static int? _startFrom(Uri uri) {
@@ -153,15 +222,25 @@ class YouTubeLink {
     }
   }
 
-  Map<String, Object?> toJson() => {'videoId': videoId, if (startSeconds != null) 'startSeconds': startSeconds};
+  Map<String, Object?> toJson() => {
+        if (videoId != null) 'videoId': videoId,
+        if (startSeconds != null) 'startSeconds': startSeconds,
+        if (playlistId != null) 'playlistId': playlistId,
+        if (playlistIndex != null) 'playlistIndex': playlistIndex,
+      };
 
   @override
   bool operator ==(Object other) =>
-      other is YouTubeLink && other.videoId == videoId && other.startSeconds == startSeconds;
+      other is YouTubeLink &&
+      other.videoId == videoId &&
+      other.startSeconds == startSeconds &&
+      other.playlistId == playlistId &&
+      other.playlistIndex == playlistIndex;
 
   @override
-  int get hashCode => Object.hash(videoId, startSeconds);
+  int get hashCode => Object.hash(videoId, startSeconds, playlistId, playlistIndex);
 
   @override
-  String toString() => 'YouTubeLink($videoId, start: $startSeconds)';
+  String toString() =>
+      'YouTubeLink($videoId, start: $startSeconds${playlistId != null ? ', list: $playlistId, index: $playlistIndex' : ''})';
 }

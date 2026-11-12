@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -167,5 +168,103 @@ void main() {
       expect(lib2.listing(query: 'a').items.single.durationSeconds, 125.5);
       cache.deleteSync(recursive: true);
     });
+    test('video width/height are probed, cached and labelled (4K, 1080p, 720p, unmatched)', () async {
+      final sizes = {'uhd.mkv': (3840, 2160), 'fhd.mp4': (1920, 1080), 'hd.mkv': (1280, 720), 'scope.mkv': (1920, 800)};
+      sizes.keys.forEach(touch);
+      final cache = Directory.systemTemp.createTempSync('pitv-cache');
+      addTearDown(() => cache.deleteSync(recursive: true));
+      final runner = FakeRunner();
+      runner.onRun = (c) {
+        if (c.exe == 'ffprobe') {
+          expect(c.args, containsAllInOrder(['-select_streams', 'v:0']));
+          final (w, h) = sizes[p.basename(c.args.last)]!;
+          return CommandResult(0, '{"streams":[{"width":$w,"height":$h}],"format":{"duration":"60"}}', '');
+        }
+        if (c.exe == 'ffmpeg') File(c.args.last).writeAsStringSync('jpg');
+        return const CommandResult(0, '', '');
+      };
+      final lib = LibraryService([root.path], metadata: MetadataCache(runner, cache.path));
+      await lib.rescan();
+      await lib.metadataIdle();
+      Map<String, String?> labels(LibraryService l) =>
+          {for (final e in l.listing(query: '.').items) e.title: e.resolution};
+      final want = {'fhd': '1080p', 'hd': '720p', 'scope': '1920×800', 'uhd': '4K'};
+      expect(labels(lib), want);
+      final json = lib.listing(query: 'uhd').toJson();
+      final item = ((json['items'] as List).single as Map);
+      expect([item['width'], item['height'], item['resolution']], [3840, 2160, '4K']);
+
+      // Restart: served from the on-disk cache without probing again.
+      final probes = runner.runs.length;
+      final lib2 = LibraryService([root.path], metadata: MetadataCache(runner, cache.path));
+      await lib2.rescan();
+      await lib2.metadataIdle();
+      expect(runner.runs.length, probes);
+      expect(labels(lib2), want);
+    });
+
+    test('an older cache entry without a size is re-probed with ffprobe only (thumbnail kept)', () async {
+      touch('old.mkv');
+      final cache = Directory.systemTemp.createTempSync('pitv-cache');
+      addTearDown(() => cache.deleteSync(recursive: true));
+      final runner = FakeRunner();
+      runner.onRun = (c) {
+        if (c.exe == 'ffprobe') return const CommandResult(0, '{"format":{"duration":"10"}}', '');
+        if (c.exe == 'ffmpeg') File(c.args.last).writeAsStringSync('jpg');
+        return const CommandResult(0, '', '');
+      };
+      final lib = LibraryService([root.path], metadata: MetadataCache(runner, cache.path));
+      await lib.rescan();
+      await lib.metadataIdle();
+      // Rewrite the cache as a v1 entry (no "v", no width/height).
+      final f = File(p.join(cache.path, 'metadata.json'));
+      final idx = (jsonDecode(f.readAsStringSync()) as Map).cast<String, Object?>();
+      for (final e in idx.values) {
+        (e as Map).remove('v');
+      }
+      f.writeAsStringSync(jsonEncode(idx));
+      runner.runs.clear();
+      runner.onRun = (c) {
+        if (c.exe == 'ffprobe') {
+          return const CommandResult(0, '{"streams":[{"width":1280,"height":720}],"format":{"duration":"10"}}', '');
+        }
+        return const CommandResult(0, '', '');
+      };
+      final lib2 = LibraryService([root.path], metadata: MetadataCache(runner, cache.path));
+      await lib2.rescan();
+      await lib2.metadataIdle();
+      expect(runner.runs.map((r) => r.exe), ['ffprobe']);
+      final e = lib2.listing(query: 'old').items.single;
+      expect([e.resolution, e.hasThumbnail], ['720p', isTrue]);
+    });
+  });
+
+  test('videoSizeFromProbe applies rotation and tolerates missing streams', () {
+    expect(
+        videoSizeFromProbe({
+          'streams': [
+            {
+              'width': 1920,
+              'height': 1080,
+              'side_data_list': [
+                {'rotation': -90}
+              ]
+            }
+          ]
+        }),
+        (1080, 1920));
+    expect(
+        videoSizeFromProbe({
+          'streams': [
+            {
+              'width': 1280,
+              'height': 720,
+              'tags': {'rotate': '180'}
+            }
+          ]
+        }),
+        (1280, 720));
+    expect(videoSizeFromProbe({'streams': []}), (null, null));
+    expect(videoSizeFromProbe({}), (null, null));
   });
 }

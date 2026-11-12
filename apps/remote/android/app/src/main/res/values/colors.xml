@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Pi TV charcoal (spec v0.11). -->
+    <color name="ic_launcher_background">#121416</color>
+    <color name="pitv_background">#121416</color>
+</resources>

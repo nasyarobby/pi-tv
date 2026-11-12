@@ -16,8 +16,12 @@ Future<void> enterPin(WidgetTester t, String pin) async {
 }
 
 Future<AppController> boot(WidgetTester t, FakePiServer s,
-    {bool web = true, MemorySettingsStore? store, FakeShareSource? shares, String route = '/'}) async {
-  t.view.physicalSize = const Size(1080, 2400);
+    {bool web = true,
+    MemorySettingsStore? store,
+    FakeShareSource? shares,
+    String route = '/',
+    Size size = const Size(432, 960)}) async {
+  t.view.physicalSize = size * 2.5;
   t.view.devicePixelRatio = 2.5;
   addTearDown(t.view.reset);
   final c = makeController(s, web: web, store: store, shares: shares);
@@ -64,7 +68,7 @@ void main() {
     await t.enterText(find.byKey(const ValueKey('url-input')), 'https://vimeo.com/1');
     await t.tap(find.byKey(const ValueKey('url-play')));
     await t.pumpAndSettle();
-    expect(find.text('That is not a YouTube video link'), findsOneWidget);
+    expect(find.text('That is not a YouTube video or playlist link'), findsOneWidget);
     expect(s.count('POST', '/api/play'), 0);
 
     await t.enterText(find.byKey(const ValueKey('url-input')), 'Watch https://youtu.be/dQw4w9WgXcQ?t=42 now');
@@ -213,5 +217,160 @@ void main() {
     expect(find.byKey(const ValueKey('setup-qr')), findsOneWidget);
     expect(find.text('http://192.168.1.20:8787'), findsWidgets);
     expect(find.textContaining('012345'), findsNothing);
+  });
+  group('desktop web layout', () {
+    testWidgets('wide web viewport: side nav + player and queue side by side; resizing switches layouts', (t) async {
+      final s = FakePiServer();
+      await boot(t, s, size: const Size(1440, 900));
+      await enterPin(t, '012345');
+      expect(find.byKey(const ValueKey('layout-desktop')), findsOneWidget);
+      expect(find.byType(NavigationRail), findsOneWidget);
+      expect(find.byType(NavigationBar), findsNothing);
+      expect(find.byKey(const ValueKey('desktop-side-queue')), findsOneWidget);
+      expect(find.byKey(const ValueKey('np-toggle')), findsOneWidget);
+      // The player card uses the width: artwork and controls side by side.
+      final title = t.getRect(find.byKey(const ValueKey('np-title')));
+      final toggle = t.getRect(find.byKey(const ValueKey('np-toggle')));
+      expect(title.left, greaterThan(600));
+      expect(toggle.width, 76);
+
+      // Library on desktop: grid with the player beside it.
+      await t.tap(find.text('Library'));
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('lib-item-f1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('desktop-side-player')), findsOneWidget);
+
+      // Narrow the browser: the phone layout, same tab.
+      t.view.physicalSize = const Size(420, 900) * 2.5;
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('layout-compact')), findsOneWidget);
+      expect(find.byType(NavigationBar), findsOneWidget);
+      expect(find.byType(NavigationRail), findsNothing);
+      expect(find.text('Film One'), findsOneWidget, reason: 'still on the Library tab');
+
+      t.view.physicalSize = const Size(1200, 800) * 2.5;
+      await t.pumpAndSettle();
+      expect(find.byKey(const ValueKey('layout-desktop')), findsOneWidget);
+    });
+
+    testWidgets('just under the breakpoint stays compact; Android stays compact at any width', (t) async {
+      final s = FakePiServer();
+      await boot(t, s, size: const Size(999, 900));
+      await enterPin(t, '012345');
+      expect(find.byKey(const ValueKey('layout-compact')), findsOneWidget);
+    });
+
+    testWidgets('Android tablet width keeps the stacked layout', (t) async {
+      final s = FakePiServer();
+      final store = MemorySettingsStore();
+      await boot(t, s, web: false, store: store, size: const Size(1280, 800));
+      await t.enterText(find.byKey(const ValueKey('server-address')), '192.168.1.20');
+      await t.tap(find.byKey(const ValueKey('server-connect')));
+      await t.pumpAndSettle();
+      await enterPin(t, '012345');
+      expect(find.byKey(const ValueKey('layout-compact')), findsOneWidget);
+      expect(find.byType(NavigationRail), findsNothing);
+    });
+  });
+
+  group('library Back goes up one folder', () {
+    FakePiServer nested() => FakePiServer()
+      ..folders = true
+      ..files = [
+        {'id': 'k1', 'title': 'Cartoon', 'path': 'Movies/Kids/Cartoon.mkv', 'folder': 'Movies/Kids', 'size': 1},
+        {'id': 'm1', 'title': 'Drama', 'path': 'Movies/Drama.mkv', 'folder': 'Movies', 'size': 1},
+      ];
+
+    for (final web in [true, false]) {
+      testWidgets('${web ? 'browser' : 'Android system'} Back: Kids -> Movies -> root -> leaves', (t) async {
+        final s = nested();
+        await boot(t, s, web: web);
+        if (!web) {
+          await t.enterText(find.byKey(const ValueKey('server-address')), '192.168.1.20');
+          await t.tap(find.byKey(const ValueKey('server-connect')));
+          await t.pumpAndSettle();
+        }
+        await enterPin(t, '012345');
+        await t.tap(find.text('Library'));
+        await t.pumpAndSettle();
+        await t.tap(find.text('Movies'));
+        await t.pumpAndSettle();
+        await t.tap(find.text('Kids'));
+        await t.pumpAndSettle();
+        expect(find.text('Cartoon'), findsOneWidget);
+
+        // Back (system / browser) is delivered as a route pop.
+        expect(await t.binding.handlePopRoute(), isTrue);
+        await t.pumpAndSettle();
+        expect(find.text('Drama'), findsOneWidget, reason: 'up to Movies');
+        expect(find.text('Cartoon'), findsNothing);
+        expect(find.text('Kids'), findsOneWidget);
+
+        expect(await t.binding.handlePopRoute(), isTrue);
+        await t.pumpAndSettle();
+        expect(find.text('Movies'), findsOneWidget, reason: 'up to the library root');
+        expect(find.text('Drama'), findsNothing);
+
+        // At the root Back is not consumed: the existing leave/exit behavior.
+        expect(await t.binding.handlePopRoute(), isFalse);
+      });
+    }
+
+    testWidgets('Back on another tab is not swallowed by the library', (t) async {
+      final s = nested();
+      await boot(t, s);
+      await enterPin(t, '012345');
+      await t.tap(find.text('Library'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Movies'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('History'));
+      await t.pumpAndSettle();
+      expect(await t.binding.handlePopRoute(), isFalse);
+    });
+  });
+
+  testWidgets('resolution labels in the library list and on now playing', (t) async {
+    final s = FakePiServer()
+      ..files = [
+        {'id': 'u', 'title': 'Ultra', 'path': 'Ultra.mkv', 'folder': '', 'size': 1, 'width': 3840, 'height': 2160},
+        {'id': 'h', 'title': 'Hd', 'path': 'Hd.mkv', 'folder': '', 'size': 1, 'width': 1280, 'height': 720},
+        {'id': 'w', 'title': 'Scope', 'path': 'Scope.mkv', 'folder': '', 'size': 1, 'width': 1920, 'height': 800},
+        {'id': 'n', 'title': 'Unknown', 'path': 'Unknown.mkv', 'folder': '', 'size': 1},
+      ];
+    await boot(t, s);
+    await enterPin(t, '012345');
+    await t.tap(find.text('Library'));
+    await t.pumpAndSettle();
+    expect(find.text('4K'), findsOneWidget);
+    expect(find.text('720p'), findsOneWidget);
+    expect(find.text('1920×800'), findsOneWidget);
+    await t.tap(find.text('Ultra'));
+    await t.pumpAndSettle();
+    await t.tap(find.byKey(const ValueKey('lib-play-now')));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Now playing').first);
+    await t.pumpAndSettle();
+    expect(find.descendant(of: find.byType(Card), matching: find.byKey(const ValueKey('res-4K'))), findsWidgets);
+  });
+
+  testWidgets('a playlist URL is sent with list= kept and shows as one playlist item', (t) async {
+    final s = FakePiServer();
+    await boot(t, s);
+    await enterPin(t, '012345');
+    await t.enterText(
+        find.byKey(const ValueKey('url-input')), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLabc123&index=2');
+    await t.tap(find.byKey(const ValueKey('url-play')));
+    await t.pumpAndSettle();
+    final play = s.requests.lastWhere((r) => r.url.path == '/api/play');
+    expect(play.body, contains('list=PLabc123'));
+    expect(find.text('Playlist 1/5'), findsOneWidget);
+    // Next is available inside the playlist even with an empty queue.
+    await t.pump(const Duration(seconds: 6));
+    await t.pumpAndSettle();
+    await t.ensureVisible(find.byKey(const ValueKey('np-next')));
+    await t.tap(find.byKey(const ValueKey('np-next')));
+    await t.pumpAndSettle();
+    expect(s.requests.where((r) => r.url.path == '/api/control').single.body, contains('"action":"next"'));
   });
 }

@@ -15,7 +15,7 @@ void main() {
       'https://youtube.com/shorts/$id?feature=share': const YouTubeLink(id),
       'https://www.youtube.com/embed/$id': const YouTubeLink(id),
       'https://www.youtube-nocookie.com/embed/$id?start=12': const YouTubeLink(id, startSeconds: 12),
-      'https://music.youtube.com/watch?v=$id&list=RDAMVM$id': const YouTubeLink(id),
+      'https://music.youtube.com/watch?v=$id&list=RDAMVM$id': const YouTubeLink(id, playlistId: 'RDAMVM$id'),
       'https://www.youtube.com/live/$id': const YouTubeLink(id),
       'www.youtube.com/watch?v=$id': const YouTubeLink(id),
       'youtu.be/$id': const YouTubeLink(id),
@@ -77,6 +77,56 @@ void main() {
     });
   });
 
+  group('playlists', () {
+    const list = 'PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf';
+    test('watch?v= plus list keeps the list and index', () {
+      final l = YouTubeLink.parse('https://www.youtube.com/watch?v=$id&list=$list&index=3&t=10s')!;
+      expect(l, const YouTubeLink(id, playlistId: list, playlistIndex: 3, startSeconds: 10));
+      expect(l.isPlaylist, isTrue);
+      expect(l.watchUrl.toString(), 'https://www.youtube.com/watch?v=$id&list=$list&index=3&t=10s');
+    });
+    test('playlist?list= is a playlist-only link opened as the playlist URL', () {
+      final l = YouTubeLink.parse('https://www.youtube.com/playlist?list=$list')!;
+      expect(l, const YouTubeLink.playlist(list));
+      expect(l.videoId, isNull);
+      expect(l.thumbnailUrl, isNull);
+      expect(l.watchUrl.toString(), 'https://www.youtube.com/playlist?list=$list');
+    });
+    test('the TV URL is never rewritten as a bare watch?v= link', () {
+      for (final input in [
+        'https://youtu.be/$id?list=$list',
+        'https://m.youtube.com/watch?v=$id&list=$list',
+        'https://music.youtube.com/watch?v=$id&list=$list',
+        'https://www.youtube.com/embed/$id?list=$list',
+      ]) {
+        final u = YouTubeLink.parse(input)!.watchUrl;
+        expect(u.queryParameters['list'], list, reason: input);
+        expect(u.queryParameters['v'], id, reason: input);
+      }
+    });
+    test('music.youtube.com playlist, embed/videoseries and watch?list=', () {
+      expect(YouTubeLink.parse('https://music.youtube.com/playlist?list=$list'), const YouTubeLink.playlist(list));
+      expect(
+          YouTubeLink.parse('https://www.youtube.com/embed/videoseries?list=$list'), const YouTubeLink.playlist(list));
+      expect(YouTubeLink.parse('https://www.youtube.com/watch?list=$list&index=2'),
+          const YouTubeLink.playlist(list, playlistIndex: 2));
+    });
+    test('playlist share text', () {
+      expect(YouTubeLink.parse('My mix 🎶 https://youtube.com/playlist?list=$list&si=abc.'),
+          const YouTubeLink.playlist(list));
+    });
+    test('index without a list is ignored; bad index ignored', () {
+      expect(YouTubeLink.parse('https://www.youtube.com/watch?v=$id&index=4'), const YouTubeLink(id));
+      expect(YouTubeLink.parse('https://www.youtube.com/watch?v=$id&list=$list&index=x'),
+          const YouTubeLink(id, playlistId: list));
+    });
+    test('json and label', () {
+      const l = YouTubeLink(id, playlistId: list, playlistIndex: 2);
+      expect(l.toJson(), {'videoId': id, 'playlistId': list, 'playlistIndex': 2});
+      expect(l.shortLabel, contains('playlist $list'));
+    });
+  });
+
   group('rejection', () {
     for (final bad in [
       '',
@@ -86,7 +136,10 @@ void main() {
       'https://evilyoutube.com/watch?v=$id',
       'https://vimeo.com/123456',
       'https://www.youtube.com/watch?v=short',
-      'https://www.youtube.com/playlist?list=PL123',
+      'https://www.youtube.com/playlist?list=',
+      'https://www.youtube.com/playlist?list=bad%20id',
+      'https://www.youtube.com/@channel?list=PLabc',
+      'https://example.com/playlist?list=PLabcdef',
       'https://www.youtube.com/@channel',
       'ftp://youtube.com/watch?v=$id',
       'javascript:alert(1)//youtu.be/$id',

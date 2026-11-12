@@ -14,6 +14,10 @@ class PlayerSnapshot {
     this.muted = false,
     this.title,
     this.subtitles,
+    this.width,
+    this.height,
+    this.playlistIndex,
+    this.playlistLength,
   });
 
   /// Whether the player window (Chromium / mpv) is up.
@@ -27,6 +31,18 @@ class PlayerSnapshot {
   final String? title;
   final bool? subtitles;
 
+  /// Video size as decoded by the player (mpv), when known.
+  final int? width;
+  final int? height;
+
+  /// 0-based position and length of the YouTube playlist being played
+  /// (`null` when not in a playlist or unknown).
+  final int? playlistIndex;
+  final int? playlistLength;
+
+  /// A YouTube playlist is playing and has a video after the current one.
+  bool get hasPlaylistNext => playlistIndex != null && playlistLength != null && playlistIndex! < playlistLength! - 1;
+
   PlayerSnapshot copyWith({
     bool? open,
     double? position,
@@ -37,6 +53,8 @@ class PlayerSnapshot {
     bool? muted,
     String? title,
     bool? subtitles,
+    int? width,
+    int? height,
   }) =>
       PlayerSnapshot(
         open: open ?? this.open,
@@ -48,6 +66,10 @@ class PlayerSnapshot {
         muted: muted ?? this.muted,
         title: title ?? this.title,
         subtitles: subtitles ?? this.subtitles,
+        width: width ?? this.width,
+        height: height ?? this.height,
+        playlistIndex: playlistIndex,
+        playlistLength: playlistLength,
       );
 
   @override
@@ -98,9 +120,21 @@ abstract class Player {
   /// Never called automatically.
   Future<void> toggleFullscreen();
 
+  /// Next/previous inside the current item: for a YouTube playlist, skip to
+  /// the next/previous video of that playlist. Returns `false` when there
+  /// is nothing to skip to inside the item (single video, last/first video
+  /// of the playlist, local files), so the caller moves in our queue.
+  Future<bool> skipInItem({required bool forward});
+
   /// Exits fullscreen and tears the window down. Only called for an explicit
   /// Close from a remote, or when switching to the other player.
   Future<void> close();
+
+  /// Like [close], but also catches a window this instance is not attached
+  /// to (e.g. left open by a previous server run, or after the connection
+  /// to it dropped). A no-op when nothing of this player is running. Used
+  /// when switching players so both are never open at once.
+  Future<void> closeIfRunning();
 
   /// Releases resources without closing the window (server shutdown).
   Future<void> dispose();

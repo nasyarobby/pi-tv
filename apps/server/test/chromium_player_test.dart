@@ -319,4 +319,105 @@ void main() {
       expect(marker.readAsStringSync(), 'session');
     });
   });
+  group('YouTube playlists', () {
+    const list = 'PLtest123';
+    void setupPlaylist() {
+      cdp.page
+        ..playlistId = list
+        ..playlist = ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc'];
+    }
+
+    test('watch?v= + list opens with list and index kept, not a bare watch?v= URL', () async {
+      setupPlaylist();
+      await player.load(const PlayTarget.youtube(YouTubeLink('bbbbbbbbbbb', playlistId: list, playlistIndex: 2)));
+      expect(runner.starts.single.args.last, 'https://www.youtube.com/watch?v=bbbbbbbbbbb&list=$list&index=2');
+      expect(cdp.page.list, list);
+      expect(player.snapshot.playlistIndex, 1);
+      expect(player.snapshot.playlistLength, 3);
+    });
+
+    test('a bare playlist?list= link opens the playlist and starts its first video', () async {
+      setupPlaylist();
+      await player.load(const PlayTarget.youtube(YouTubeLink.playlist(list)));
+      expect(runner.starts.single.args.last, 'https://www.youtube.com/playlist?list=$list');
+      expect(cdp.log, contains('eval:playall'));
+      expect(cdp.page.vid, 'aaaaaaaaaaa');
+      expect(cdp.page.list, list);
+      expect(player.snapshot.paused, isFalse);
+    });
+
+    test('YouTube advancing inside the playlist is accepted, not sent back', () async {
+      setupPlaylist();
+      await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa', playlistId: list)));
+      cdp.page.advancePlaylist();
+      await player.pause(); // poll
+      expect(cdp.page.vid, 'bbbbbbbbbbb');
+      expect(player.snapshot.ended, isFalse);
+      expect(player.snapshot.playlistIndex, 1);
+    });
+
+    test('a playlist video that ends mid-playlist is not the end of the item', () async {
+      setupPlaylist();
+      await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa', playlistId: list)));
+      cdp.page.ended = true;
+      await player.pause();
+      expect(player.snapshot.ended, isFalse, reason: 'YouTube autoplays the next playlist video');
+    });
+
+    test('the last playlist video ending is the end; related autoplay after it is blocked', () async {
+      setupPlaylist();
+      await player.load(const PlayTarget.youtube(YouTubeLink('ccccccccccc', playlistId: list, playlistIndex: 3)));
+      cdp.page.ended = true;
+      await player.pause();
+      expect(player.snapshot.ended, isTrue);
+      // YouTube then autoplays a related video (no list): sent back.
+      cdp.page.url = 'https://www.youtube.com/watch?v=RELATED0000';
+      await player.pause();
+      expect(cdp.page.vid, 'ccccccccccc');
+      expect(cdp.page.list, list);
+      expect(player.snapshot.ended, isTrue);
+    });
+
+    test('a related video outside the playlist mid-playlist is still blocked', () async {
+      setupPlaylist();
+      await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa', playlistId: list)));
+      cdp.page.url = 'https://www.youtube.com/watch?v=RELATED0000';
+      await player.pause();
+      expect(cdp.page.vid, 'aaaaaaaaaaa');
+    });
+
+    test('next/previous skip inside the playlist, false at the edges and for single videos', () async {
+      setupPlaylist();
+      await player.load(const PlayTarget.youtube(YouTubeLink('aaaaaaaaaaa', playlistId: list)));
+      expect(await player.skipInItem(forward: false), isFalse);
+      expect(await player.skipInItem(forward: true), isTrue);
+      expect(cdp.page.vid, 'bbbbbbbbbbb');
+      expect(await player.skipInItem(forward: true), isTrue);
+      expect(cdp.page.vid, 'ccccccccccc');
+      expect(await player.skipInItem(forward: true), isFalse, reason: 'last video: our queue moves');
+      expect(await player.skipInItem(forward: false), isTrue);
+      expect(cdp.page.vid, 'bbbbbbbbbbb');
+
+      await player.load(const PlayTarget.youtube(link));
+      expect(await player.skipInItem(forward: true), isFalse);
+    });
+
+    test('the guard only blocks autonav outside an unfinished playlist', () {
+      expect(youtubeGuardScript, contains('inOpenPlaylist'));
+      expect(youtubeGuardScript, contains('if (!inOpenPlaylist()) cancelAutonav();'));
+    });
+  });
+
+  test('closeIfRunning closes a Chromium left on the CDP port by a previous server run', () async {
+    cdp.up = true; // not launched or attached by this instance
+    expect(player.isOpen, isFalse);
+    await player.closeIfRunning();
+    expect(cdp.browserClosed, isTrue);
+  });
+
+  test('closeIfRunning is a no-op when no Chromium is running', () async {
+    await player.closeIfRunning();
+    expect(cdp.browserClosed, isFalse);
+    expect(cdp.log, isEmpty);
+  });
 }
