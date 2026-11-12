@@ -253,6 +253,39 @@ void main() {
       expect(find.byKey(const ValueKey('layout-desktop')), findsOneWidget);
     });
 
+    testWidgets('desktop: the empty Up next hint reads upright, left to right', (t) async {
+      final s = FakePiServer();
+      await boot(t, s, size: const Size(1440, 813));
+      await enterPin(t, '012345');
+      final hint = find.descendant(
+          of: find.byKey(const ValueKey('desktop-side-queue')),
+          matching: find.byKey(const ValueKey('queue-empty-hint')));
+      expect(hint, findsOneWidget);
+      final el = t.element(hint);
+      expect(Directionality.of(el), TextDirection.ltr);
+      // Nothing between the hint and the root rotates or mirrors it.
+      el.visitAncestorElements((a) {
+        final w = a.widget;
+        expect(w, isNot(isA<RotatedBox>()));
+        if (w is Transform) {
+          final m = w.transform;
+          expect(m.entry(0, 0), greaterThan(0), reason: 'no horizontal flip');
+          expect(m.entry(1, 1), greaterThan(0), reason: 'no vertical flip');
+          expect(m.entry(0, 1), 0, reason: 'no rotation');
+        }
+        return true;
+      });
+      final box = t.renderObject<RenderBox>(hint);
+      final m = box.getTransformTo(null);
+      expect(m.entry(0, 0), greaterThan(0));
+      expect(m.entry(1, 1), greaterThan(0));
+      expect(m.entry(0, 1), 0);
+      expect(m.entry(1, 0), 0);
+      // Laid out as horizontal lines across the panel, not a narrow column.
+      final r = t.getRect(hint);
+      expect(r.width, greaterThan(r.height));
+    });
+
     testWidgets('just under the breakpoint stays compact; Android stays compact at any width', (t) async {
       final s = FakePiServer();
       await boot(t, s, size: const Size(999, 900));

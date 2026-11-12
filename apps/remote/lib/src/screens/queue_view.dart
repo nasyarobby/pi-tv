@@ -38,8 +38,11 @@ class QueueView extends StatelessWidget {
               ? const Center(
                   child: Padding(
                     padding: EdgeInsets.symmetric(horizontal: 24),
-                    child: Text('The queue is empty. Use "Add to queue" on a link or a library file.',
-                        textAlign: TextAlign.center, style: TextStyle(color: PiTvColors.textMuted)),
+                    child: Text(
+                        key: ValueKey('queue-empty-hint'),
+                        'The queue is empty. Use "Add to queue" on a link or a library file.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: PiTvColors.textMuted)),
                   ),
                 )
               : ReorderableListView.builder(
